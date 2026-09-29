@@ -774,9 +774,16 @@ private fun ShellScreen(viewModel: MainViewModel) {
     ) {
         item {
             Text(
-                "These commands need `adb` from a computer, or a shell running in the OWNER " +
-                    "profile. An app cannot uninstall another app while keeping its data — there " +
-                    "is no public API for `pm uninstall -k`.",
+                // Understating this is worse than a long paragraph: a user who copies the
+                // runbook expecting plain `adb` to work gets a wall of "Permission denied" and
+                // concludes their data is lost. It is not — but they cannot tell that from the
+                // error, so the requirement goes in the first sentence.
+                "These commands need ROOT: `adb root` on a userdebug/eng build, or `su`. A " +
+                    "plain `adb` shell is refused — uid 2000 cannot reach another user's " +
+                    "storage, and root cannot reach the /storage/emulated view of it either, so " +
+                    "the paths below are the raw /data/media ones. An app cannot uninstall " +
+                    "another app while keeping its data; there is no public API for " +
+                    "`pm uninstall -k`.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

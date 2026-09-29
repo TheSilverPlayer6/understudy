@@ -50,7 +50,7 @@ class ShellCommandsTest {
         assertTrue("|| true" in script, "a missing directory should not abort the sequence")
         assertTrue("set -e" in script, "the sequence must stop on a real failure")
 
-        assertTrue(script.contains("mv '/storage/emulated/$user/Android/data/$pkg'"))
+        assertTrue(script.contains("mv '/data/media/$user/Android/data/$pkg'"), script)
         assertTrue(ShellCommands.BACKUP_SUFFIX in script)
     }
 
@@ -60,7 +60,42 @@ class ShellCommandsTest {
         assertTrue("[ ! -e " in script, "must not overwrite a directory that came back")
         assertTrue("[ -d " in script)
         val suffix = ShellCommands.BACKUP_SUFFIX
-        assertTrue(script.contains("mv '/storage/emulated/$user/Android/data/$pkg$suffix'"), script)
+        assertTrue(script.contains("mv '/data/media/$user/Android/data/$pkg$suffix'"), script)
+    }
+
+    /**
+     * The rename steps must operate on the RAW lower filesystem and must say they need root.
+     *
+     * The original runbook used `/storage/emulated/<user>/...` on the theory that uid 2000 is
+     * exempt from the FUSE filter for every user's tree. CI run #12 measured that assumption and
+     * it is false: as `u:r:shell:s0` on an API 34/35 AOSP emulator, `/storage/emulated/10`,
+     * `/storage/emulated/10/Android/data/<pkg>`, a file inside it, and `/data/media/10` ALL
+     * returned `Permission denied`. Root is refused the FUSE view too. A runbook whose every
+     * command fails is worse than no runbook, because it looks like help.
+     *
+     * Both halves are pinned: the paths, and the fact that renameAside and renameBack agree on
+     * them. A mismatch there moves the data aside on one filesystem and looks for the backup on
+     * another, silently leaving it under a `.understudy-bak` name the user did not choose.
+     */
+    @Test
+    fun `the rename steps use raw paths, require root, and agree with each other`() {
+        val aside = ShellCommands.renameAside(user, pkg)
+        val back = ShellCommands.renameBack(user, pkg)
+
+        for (script in listOf(aside, back)) {
+            assertTrue("/data/media/$user/Android/data/$pkg" in script, script)
+            assertTrue("/data/media/$user/Android/obb/$pkg" in script, script)
+            assertFalse(
+                "/storage/emulated/" in script,
+                "a plain shell is refused the FUSE view of another user; these commands must " +
+                    "not be written against it:\n$script",
+            )
+            assertTrue("ROOT" in script.uppercase(), "the root requirement must be stated:\n$script")
+        }
+
+        // The backup names have to match, or renameBack cannot find what renameAside created.
+        val suffix = ShellCommands.BACKUP_SUFFIX
+        assertTrue("$pkg$suffix" in aside && "$pkg$suffix" in back)
     }
 
     @Test
@@ -89,11 +124,11 @@ class ShellCommandsTest {
         val script = ShellCommands.fullRenameAsideRunbook(user, pkg)
 
         val inspect = script.indexOf("pm list packages")
-        val aside = script.indexOf("mv '/storage/emulated/$user/Android/data/$pkg'")
+        val aside = script.indexOf("mv '/data/media/$user/Android/data/$pkg'")
         val destroy = script.indexOf("pm uninstall $pkg")
         val install = script.indexOf("adb install --user $user")
         val keepUninstall = script.indexOf("pm uninstall -k --user $user")
-        val back = script.indexOf("mv '/storage/emulated/$user/Android/data/$pkg${ShellCommands.BACKUP_SUFFIX}'")
+        val back = script.indexOf("mv '/data/media/$user/Android/data/$pkg${ShellCommands.BACKUP_SUFFIX}'")
 
         assertTrue(inspect >= 0 && aside >= 0 && destroy >= 0 && install >= 0 &&
             keepUninstall >= 0 && back >= 0, "runbook is missing a step:\n$script")
@@ -163,7 +198,7 @@ class ShellCommandsTest {
     @Test
     fun `the runbook repairs ownership after restoring the directories`() {
         val script = ShellCommands.fullRenameAsideRunbook(user, pkg)
-        val restore = script.indexOf("mv '/storage/emulated/$user/Android/data/$pkg${ShellCommands.BACKUP_SUFFIX}'")
+        val restore = script.indexOf("mv '/data/media/$user/Android/data/$pkg${ShellCommands.BACKUP_SUFFIX}'")
         val chown = script.indexOf("chown -R")
         assertTrue(restore >= 0 && chown >= 0, "runbook is missing a step")
         assertTrue(restore < chown, "ownership must be repaired AFTER the directories are back")

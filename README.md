@@ -57,12 +57,22 @@ So there are two paths:
 | Situation | Path |
 |---|---|
 | Target installed nowhere on the device | Pure in-profile flow. No adb, no shell, no owner-profile install. |
-| Target installed or retained anywhere | Needs a shell for the rename-aside runbook (see below). |
+| Target installed or retained anywhere | Needs **root** for the rename-aside runbook (see below). |
 
 The rename-aside runbook moves the private directories to a `.understudy-bak` name, does a full
 uninstall to clear the device-wide record, installs the proxy, does the work, uninstalls with
 `-k`, then moves the directories back. The **Shell** tab generates every command with the real
 user id and paths filled in.
+
+**It needs root, and that was measured rather than assumed.** The original design rested on
+`adb shell` (uid 2000) being exempt from the FUSE filter for *every* user's tree. On API 34/35
+AOSP emulators it is not: uid 2000 gets `Permission denied` on `/storage/emulated/10`, on
+`/storage/emulated/10/Android/data/<pkg>`, on a file inside it, and on `/data/media/10`. Root is
+refused the FUSE view too — even uid 0 gets EACCES on `/storage/emulated/10` — which is why the
+runbook operates on the raw lower filesystem. So the conflict path requires `adb root`
+(userdebug/eng) or `su`. On a production device with neither, the conflict case has **no**
+non-destructive resolution from this app; the unprivileged flows below are the whole product for
+those users, not a subset of it. OEM behaviour is untested and may differ.
 
 ## What it cannot do
 

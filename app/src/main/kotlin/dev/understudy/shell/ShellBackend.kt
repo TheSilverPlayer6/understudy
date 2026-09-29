@@ -112,18 +112,30 @@ object ShellCommands {
     /**
      * Renames both private directories aside so a full uninstall cannot delete them.
      *
-     * `adb shell` runs as uid 2000 in the `shell_data_file` SELinux domain, which is exempt
-     * from the FUSE filter that hides `Android/data` from apps — that is the only reason this
-     * works, and it is also why it can see *every* user's tree.
+     * **Needs root, and this was measured rather than assumed.** The original design rested on
+     * `adb shell` (uid 2000, `shell_data_file` domain) being exempt from the FUSE filter for
+     * *every* user's tree. CI run #12 disproved that: as uid 2000 on an API 34/35 AOSP emulator,
+     * `/storage/emulated/10`, `/storage/emulated/10/Android/data/<pkg>`, a file inside it, and
+     * `/data/media/10` all returned `Permission denied`. Root is refused the FUSE view too —
+     * run #11 got EACCES on `/storage/emulated/10` even as uid 0. Shell is exempt only within
+     * its own user.
+     *
+     * So these commands use the RAW lower filesystem, which root can reach, and say up front
+     * that root is required. On a production device with neither `adb root` nor `su` there is no
+     * shell path into another user's private storage at all; the unprivileged flows
+     * ([uninstallKeepingData] aside) are the whole product for those users, not a subset of it.
      *
      * Each `mv` is guarded by a `-d` test so re-running the sequence is harmless, and so a
      * missing directory (never installed for that user) is not treated as an error.
      */
     fun renameAside(userId: Int, packageName: String): String {
-        val data = dataDir(userId, packageName)
-        val obb = obbDir(userId, packageName)
+        val data = rawDataDir(userId, packageName)
+        val obb = rawObbDir(userId, packageName)
         return listOf(
             "# Move the target's private storage aside so uninstalling cannot delete it.",
+            "# REQUIRES ROOT: `adb root` first (userdebug/eng) or run the inner block via su.",
+            "# A plain uid-2000 shell is refused here — measured on API 34/35, see the KDoc.",
+            "# Operates on the raw lower fs because root is denied the FUSE view of another user.",
             "# Re-running is safe: each move is guarded by a directory test.",
             "adb shell '",
             "set -e",
@@ -136,10 +148,14 @@ object ShellCommands {
 
     /** Moves the directories back after the proxy work is finished. */
     fun renameBack(userId: Int, packageName: String): String {
-        val data = dataDir(userId, packageName)
-        val obb = obbDir(userId, packageName)
+        // Must use the SAME paths as renameAside, or the runbook moves the data aside on the raw
+        // lower fs and then looks for the backup on the FUSE view — where it is not, and where
+        // root is refused anyway. A mismatch here silently does nothing and leaves the user's
+        // data under a `.understudy-bak` name they did not choose.
+        val data = rawDataDir(userId, packageName)
+        val obb = rawObbDir(userId, packageName)
         return listOf(
-            "# Restore the private storage to its real name.",
+            "# Restore the private storage to its real name. REQUIRES ROOT, as renameAside does.",
             "# Will not clobber an existing directory: if the real name is already taken, this",
             "# stops and leaves the backup in place for you to inspect.",
             "#",
