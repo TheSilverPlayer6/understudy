@@ -279,6 +279,10 @@ class BridgeClient(
         putString(BridgeContract.ARG_PATH, uriFor(root, relativePath).toString())
     }
 
+    // Not the KTX `toUri()` extension that lint suggests: this class is mirrored by the proxy's
+    // own contract handling, and keeping both ends on plain framework APIs means neither needs a
+    // dependency the other lacks. Worth more than silencing a style warning.
+    @Suppress("UseKtx")
     private fun uriForRoot(): Uri = Uri.parse("content://$authority")
 
     fun uriFor(root: StorageRoot, relativePath: String): Uri {

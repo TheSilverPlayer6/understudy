@@ -3,6 +3,7 @@ package dev.understudy
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import androidx.core.content.edit
 import dev.understudy.core.SessionManager
 import dev.understudy.install.ApkGenerator
 import dev.understudy.install.ProxyInstaller
@@ -72,16 +73,16 @@ class Prefs(context: Context) {
     /** Last SAF destination, so a resumed transfer does not re-prompt for a folder. */
     var lastDestinationUri: Uri?
         get() = store.getString(KEY_DESTINATION, null)?.let(Uri::parse)
-        set(value) = store.edit().putString(KEY_DESTINATION, value?.toString()).apply()
+        set(value) = store.edit { putString(KEY_DESTINATION, value?.toString()) }
 
     /** Package name the user last worked on — resuming a session matters more than privacy here. */
     var lastTargetPackage: String?
         get() = store.getString(KEY_TARGET, null)
-        set(value) = store.edit().putString(KEY_TARGET, value).apply()
+        set(value) = store.edit { putString(KEY_TARGET, value) }
 
     var lastUserId: Int
         get() = store.getInt(KEY_USER, 0)
-        set(value) = store.edit().putInt(KEY_USER, value).apply()
+        set(value) = store.edit { putInt(KEY_USER, value) }
 
     /**
      * Set once the user has acknowledged that a proxy is installed.
@@ -92,7 +93,7 @@ class Prefs(context: Context) {
      */
     var outstandingProxyPackage: String?
         get() = store.getString(KEY_OUTSTANDING, null)
-        set(value) = store.edit().putString(KEY_OUTSTANDING, value).apply()
+        set(value) = store.edit { putString(KEY_OUTSTANDING, value) }
 
     private companion object {
         const val FILE = "understudy"

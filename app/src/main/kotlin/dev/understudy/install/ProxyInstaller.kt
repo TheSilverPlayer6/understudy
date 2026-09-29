@@ -7,6 +7,7 @@ import android.content.IntentSender
 import android.content.pm.PackageInstaller
 import android.os.Process
 import android.provider.Settings
+import androidx.core.net.toUri
 import java.io.File
 import java.io.IOException
 
@@ -38,7 +39,7 @@ class ProxyInstaller(private val context: Context) {
     fun unknownSourcesSettingsIntent(): Intent =
         Intent(
             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-            android.net.Uri.parse("package:${context.packageName}"),
+            "package:${context.packageName}".toUri(),
         )
 
     /**

@@ -378,7 +378,9 @@ class MainViewModel(private val application: Application) : ViewModel() {
 
     override fun onCleared() {
         transferJob?.cancel()
-        super.onCleared()
+        // No super call: ViewModel.onCleared is annotated @EmptySuper, and lint is right that
+        // calling it adds nothing. Leaving it out also means a future androidx version cannot
+        // change what runs here behind our back.
     }
 
     private companion object {
