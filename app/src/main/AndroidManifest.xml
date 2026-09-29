@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Needed to stage the generated proxy APK through PackageInstaller. This is a PER-USER
+      appop: it must be granted separately inside each secondary profile, from that
+      profile's own Settings. The app detects the missing grant and deep-links the user
+      there rather than failing with an opaque installer error.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      Required to reach the proxy's exported provider, which is guarded by this signature-level
+      permission. The grant is automatic — no user prompt — *provided both APKs are signed with
+      the same key*, which is why the signing identity has to stay stable across runs.
+
+      Easy to forget and invisible in unit tests: Robolectric does not enforce permissions, so
+      the bridge works fine on the JVM without this line and then fails with SecurityException on
+      every real device. Caught by the instrumented CI run.
+    -->
+    <uses-permission android:name="dev.understudy.permission.BRIDGE" />
+
+    <!--
+      Deliberately NOT requested:
+        * QUERY_ALL_PACKAGES — Play-restricted and unnecessary. We never enumerate packages;
+          we detect the proxy by calling its provider, which doubles as proof that it works.
+        * MANAGE_EXTERNAL_STORAGE — useless here by design. Since Android 11 the FUSE layer
+          hides other apps' Android/data even from "All files access" holders, which is the
+          whole reason this app exists.
+    -->
+
+    <application
+        android:name=".UnderstudyApp"
+        android:allowBackup="false"
+        android:hasFragileUserData="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Understudy">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Understudy">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Receives PackageInstaller session results. Not exported: the PendingIntent we hand
+          to the system installer carries our own identity back to us.
+        -->
+        <receiver
+            android:name=".install.InstallResultReceiver"
+            android:exported="false" />
+    </application>
+
+</manifest>

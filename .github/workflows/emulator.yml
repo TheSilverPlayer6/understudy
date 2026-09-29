@@ -1,0 +1,155 @@
+# Runs the instrumented tests that verify the project's central premise on a real Android
+# system: that a proxy APK carrying package P, installed for user N, can read and write
+# /storage/emulated/N/Android/{data,obb}/P and hand those bytes to another app.
+#
+# That claim is about the kernel's FUSE layer, so no JVM test can cover it. This workflow is
+# the only place in the project where it is actually checked.
+#
+# Orchestration has to happen in shell rather than in the test, because creating a user and
+# installing packages both need uid 2000 — an app cannot do either, not even an instrumented one.
+name: emulator
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run at a time: emulator jobs are slow and queueing them wastes the monthly minutes.
+concurrency:
+  group: emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jvm:
+    name: Unit tests + generated-APK verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # The wrapper's distributionUrl points at a GitHub mirror because the reference build
+      # sandbox blocks services.gradle.org. That mirror is reachable from here too.
+      - name: Unit tests
+        run: ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest
+
+      - name: Build every variant
+        run: ./gradlew --no-daemon --console=plain :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
+
+      # The generated proxy APK is written by ProxyApkFactoryTest, so verifying it here means
+      # the platform's own signer is checking our hand-rolled v1/v2 implementation on every push.
+      - name: Verify the generated proxy APK with apksigner
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/proxy-test -name '*.apk' | head -1)
+          test -n "$APK" || { echo "no generated APK; did ProxyApkFactoryTest skip itself?"; exit 1; }
+          echo "Verifying $APK"
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$APK" | grep '^package:'
+          "$ANDROID_HOME"/build-tools/*/zipalign -c -p 4 "$APK" && echo "ALIGNMENT OK"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: |
+            app/build/reports/tests/
+            app/build/outputs/apk/
+            app/build/outputs/proxy-test/
+          if-no-files-found: warn
+          retention-days: 14
+
+  premise:
+    name: FUSE premise on a secondary user profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: jvm
+    strategy:
+      fail-fast: false
+      matrix:
+        # API 34 and 36 straddle the range this app targets: 34 is a widely-deployed baseline and
+        # 36 is current. The FUSE restriction landed in API 30, so anything below that would
+        # pass for the wrong reason.
+        api-level: [34, 36]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # GitHub-hosted Linux runners expose /dev/kvm, but the udev rules leave it root-only.
+      # Without this the emulator falls back to software emulation and times out.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Build the APKs
+        run: ./gradlew --no-daemon --console=plain :app:assembleDebug :app:assembleDebugAndroidTest
+
+      # ProxyApkFactoryTest writes a signed proxy APK for com.example.targetgame as a side
+      # effect. Generating it here rather than in a separate task means CI verifies exactly the
+      # code path the app uses at runtime.
+      - name: Generate the proxy APK
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest \
+            --tests '*ProxyApkFactoryTest*' --rerun-tasks
+          APK=$(find app/build/outputs/proxy-test -name 'proxy-*.apk' | head -1)
+          test -n "$APK"
+          cp "$APK" /tmp/proxy.apk
+          ls -l /tmp/proxy.apk
+
+      - name: Boot the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          # A fresh profile each run: a snapshot could carry over state from a previous attempt
+          # and make an install look like it succeeded when it was already present.
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          script: echo "emulator up"; adb shell getprop ro.build.version.sdk
+
+      # Everything below needs the emulator, so it lives in the runner's `script` block.
+      - name: Run the premise test in a secondary profile
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: premise-results-api${{ matrix.api-level }}
+          path: |
+            app/build/outputs/androidTest-results/
+            app/build/reports/androidTests/
+            /tmp/premise-*.log
+          if-no-files-found: warn
+          retention-days: 14

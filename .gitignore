@@ -1,0 +1,22 @@
+# Gradle / Android build output
+build/
+.gradle/
+.kotlin/
+local.properties
+captures/
+*.apk.idsig
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# The signing identity is generated per-install and must never be committed.
+*.keystore
+*.jks
+*.pk8
+
+# Secrets and sandbox state
+keys/
+.secrets/
+tools/sandbox.json

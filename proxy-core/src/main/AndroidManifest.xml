@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No components here: the proxy app module declares them so that aapt resolves their
+     names against the (later re-targeted) manifest package. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

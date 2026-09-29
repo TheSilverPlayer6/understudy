@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Signature-level guard for the bridge provider. Because the proxy APK is signed with
+      Understudy's own key, only Understudy (same signer) can ever be granted this.
+      `protectionLevel="signature"` needs no runtime grant and no user prompt.
+    -->
+    <permission
+        android:name="dev.understudy.permission.BRIDGE"
+        android:protectionLevel="signature" />
+
+    <application
+        android:allowBackup="false"
+        android:hasFragileUserData="true"
+        android:label="Understudy Proxy"
+        android:supportsRtl="false">
+
+        <!--
+          The whole mechanism: this process *is* the target package for this user, so the
+          FUSE layer hands it unrestricted read/write access to its own
+          /Android/data/<pkg> and /Android/obb/<pkg>. It then re-exports that tree to
+          Understudy over Binder.
+
+          Authority is the bare package name so that retargeting the manifest's package
+          attribute also retargets the authority — one string-pool substitution.
+        -->
+        <provider
+            android:name=".bridge.ProxyFileBridge"
+            android:authorities="${applicationId}"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:permission="dev.understudy.permission.BRIDGE" />
+
+        <!--
+          Only exists so the user can see something is installed, and so we can be
+          disabled to hide the proxy from the launcher without uninstalling it.
+        -->
+        <activity
+            android:name=".ProxyStatusActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
