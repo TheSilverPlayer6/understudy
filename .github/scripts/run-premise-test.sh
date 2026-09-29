@@ -276,6 +276,44 @@ if [ -n "${PROXY_PID:-}" ]; then
 
   echo "-- what the bridge's own root resolution produced --"
   adb shell content call --user "$USER_ID" --uri "content://$TARGET_PKG" --method ping 2>&1 | head -5 || true
+
+  # The picture so far (run #13): no bind mount over Android/{data,obb} in the proxy's
+  # namespace — only the plain FUSE mount at /storage/emulated — and ro.fuse.bpf.is_running=true.
+  # Root can stat AND read the planted bytes through /proc/<pid>/root, i.e. the proxy's own
+  # mount namespace resolves the path to a perfectly good, correctly-owned directory. Yet the
+  # proxy's own listFiles() on that same path returns null for Android/data while working for
+  # Android/obb. Root has CAP_DAC_OVERRIDE, so root succeeding does not prove the app uid can
+  # open it; and the data/obb asymmetry has no DAC explanation (the proxy owns both).
+  #
+  # That leaves the FUSE daemon's per-path policy as the only thing that can differ between the
+  # two roots, and it is decided in MediaProvider's Java layer. Its denials are logged at W by
+  # "Invalid other package file access from <uid>" — but the default logcat buffer here never
+  # showed them. So raise the priority and capture the MediaProvider/FUSE side explicitly while
+  # re-triggering both listings.
+  echo "-- MediaProvider/FUSE side: capture denials while re-listing both roots --"
+  adb shell "logcat -c" 2>/dev/null || true
+  MP_LOG=/tmp/mp-probe.log
+  adb shell "logcat -v threadtime MediaProvider:V FuseDaemon:V FuseUtils:V MediaProviderForFuse:V *:S" > "$MP_LOG" 2>&1 &
+  MP_PID=$!
+  sleep 1
+  # Re-trigger through the provider, which is the proxy process doing the File calls.
+  adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -3 || true
+  adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/obb" 2>&1 | head -3 || true
+  sleep 1
+  kill "$MP_PID" 2>/dev/null || true
+  wait "$MP_PID" 2>/dev/null || true
+  echo "-- MediaProvider log for that window (filtered) --"
+  grep -iE "Invalid other package|access|denied|Android/(data|obb)|$TARGET_PKG|uid" "$MP_LOG" 2>/dev/null | head -40 || cat "$MP_LOG" 2>/dev/null | head -40
+  cp "$MP_LOG" premise-logs/mediaprovider-probe.log 2>/dev/null || true
+
+  echo "-- does the app uid itself differ from root here? (no CAP_DAC_OVERRIDE) --"
+  # If run-as works for the proxy (it is not debuggable, so this is expected to fail) we would
+  # see the app's own view. Either way, record the attempt: it distinguishes "FUSE policy
+  # refuses the uid" from "DAC refuses the uid".
+  adb shell "run-as $TARGET_PKG ls -la . 2>&1 || true" | head -4 || true
+
+  echo "-- full unfiltered logcat around the listing, for the record --"
+  adb shell "logcat -d -v threadtime -t 200" 2>&1 | grep -iE "media|fuse|targetgame|EACCES|denied" | head -40 || true
 fi
 
 log "run the instrumented premise test as user $USER_ID"
