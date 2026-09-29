@@ -716,6 +716,7 @@ private fun ShellScreen(viewModel: MainViewModel) {
         "2 · Uninstall everywhere" to commands.uninstallEverywhere,
         "3 · Uninstall keeping data" to commands.uninstallKeepData,
         "4 · Move data back" to commands.renameBack,
+        "5 · Repair ownership" to commands.restoreOwnership,
     )
 
     LazyColumn(

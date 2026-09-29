@@ -131,6 +131,10 @@ object ShellCommands {
             "# Restore the private storage to its real name.",
             "# Will not clobber an existing directory: if the real name is already taken, this",
             "# stops and leaves the backup in place for you to inspect.",
+            "#",
+            "# mv preserves ownership, so if the data was correctly owned before the rename-aside",
+            "# it is still correct now. If you restored it from a backup as root instead, run the",
+            "# ownership repair afterwards or the app will not be able to read its own files.",
             "adb shell '",
             "set -e",
             "[ -d '$data$BACKUP_SUFFIX' ] && [ ! -e '$data' ] && mv '$data$BACKUP_SUFFIX' '$data' || true",
@@ -173,6 +177,40 @@ object ShellCommands {
     /** Pushes a generated APK to somewhere `adb install` can read it. */
     fun pushApk(localPath: String, remotePath: String = "/data/local/tmp/proxy.apk"): String =
         "adb push '$localPath' '$remotePath'"
+
+    /**
+     * Repairs ownership of a package's app-specific external storage.
+     *
+     * This is not cosmetic, and it is the single easiest way to "lose" a save file that is still
+     * sitting right there on disk. The FUSE layer attributes `Android/data/<pkg>` by **owning
+     * uid**, not merely by path: the platform creates those directories as the app's uid, and
+     * anything written as root (an adb restore, a `cp` from a backup, a `tar -x`) stays
+     * `root:ext_data_rw` mode 770. The owning app then gets EACCES on its *own* directory, and
+     * `File.listFiles()` returns null — which looks exactly like "the data is gone".
+     *
+     * Verified on an API 34 emulator: a proxy installed as the target package could not list a
+     * root-owned `Android/data/<pkg>` until the tree was chowned to its uid.
+     *
+     * Run this after any adb-side restore, and after [renameBack] if the backup was made as root.
+     */
+    fun restoreOwnership(userId: Int, packageName: String): String {
+        val data = dataDir(userId, packageName)
+        val obb = obbDir(userId, packageName)
+        // NOTE the ${'$'} escapes: UID is a *shell* variable evaluated on the operator's
+        // machine, so it must survive Kotlin string interpolation literally.
+        return listOf(
+            "# Make the app's own uid own its private storage again.",
+            "# Without this, data restored via adb is unreadable BY THE APP ITSELF: FUSE",
+            "# attributes Android/data/<pkg> by owning uid, so root-owned files are denied",
+            "# even to the package that owns them, and it presents as an empty directory.",
+            "UID=${'$'}(adb shell dumpsys package $packageName | grep -m1 -oE 'userId=[0-9]+' | cut -d= -f2 | tr -d '\\r')",
+            "echo \"uid=${'$'}UID\"",
+            "adb shell \"chown -R ${'$'}UID:${'$'}UID '$data' 2>/dev/null || true\"",
+            "adb shell \"chown -R ${'$'}UID:${'$'}UID '$obb' 2>/dev/null || true\"",
+            "adb shell \"chmod 771 '$data' 2>/dev/null || true\"",
+            "adb shell ls -lan '$data'",
+        ).joinToString("\n")
+    }
 
     /** Inspects what is actually present, before and after any of the above. */
     fun inspect(userId: Int, packageName: String): String = listOf(
@@ -217,6 +255,11 @@ object ShellCommands {
         "",
         "# 6. Restore the directories to their real names.",
         renameBack(userId, packageName),
+        "",
+        "# 6b. Repair ownership. Skip only if you are certain nothing was ever written as root:",
+        "#     FUSE attributes Android/data/<pkg> by owning uid, so root-owned files are denied",
+        "#     even to the app that owns them, and it presents as an empty directory.",
+        restoreOwnership(userId, packageName),
         "",
         "# 7. Optionally reinstall the real app; it adopts the restored directories.",
         "#    (It must be the same signature as before, or step 3 has to be repeated.)",

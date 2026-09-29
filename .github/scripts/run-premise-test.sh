@@ -108,7 +108,31 @@ plant() {
     mkdir -p '$base/Android/obb/$TARGET_PKG' || exit 1
     echo -n '$PAYLOAD' > '$base/Android/data/$TARGET_PKG/planted/save.dat' || exit 1
     echo -n '$PAYLOAD' > '$base/Android/obb/$TARGET_PKG/main.1.com.example.planted.obb' || exit 1
-    ls -laR '$base/Android/data/$TARGET_PKG' '$base/Android/obb/$TARGET_PKG'
+  " || return 1
+
+  # OWNERSHIP MATTERS, and this cost a full CI cycle to find.
+  #
+  # Writing as root leaves the files `root:ext_data_rw` mode 770, and the proxy — which runs as
+  # u10aNNN — then gets EACCES from FUSE on its *own* app-specific directory, surfacing as
+  # listFiles() == null and "cannot list: ... (permission denied)".
+  #
+  # The FUSE layer attributes app-specific external storage by owning uid, not merely by path.
+  # The platform creates these directories as the app's uid; anything restoring data from a
+  # backup has to do the same or the real app (and our proxy) cannot read it back.
+  local app_uid
+  app_uid=$(adb shell dumpsys package "$TARGET_PKG" 2>/dev/null \
+              | grep -m1 -oE "userId=[0-9]+" | cut -d= -f2 | tr -d '\r')
+  if [ -z "$app_uid" ]; then
+    echo "!! could not determine the uid of $TARGET_PKG; leaving files root-owned"
+    return 1
+  fi
+  echo "proxy uid = $app_uid; chowning planted data to it"
+  adb shell "
+    chown -R '$app_uid:$app_uid' '$base/Android/data/$TARGET_PKG' || exit 1
+    chown -R '$app_uid:$app_uid' '$base/Android/obb/$TARGET_PKG'  || exit 1
+    chmod 771 '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted' || true
+    chmod 771 '$base/Android/obb/$TARGET_PKG' || true
+    ls -lan '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted'
   "
 }
 

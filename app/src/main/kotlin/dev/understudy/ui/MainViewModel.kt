@@ -277,6 +277,7 @@ class MainViewModel(private val application: Application) : ViewModel() {
             uninstallEverywhere = ShellCommands.uninstallEverywhere(pkg),
             uninstallKeepData = ShellCommands.uninstallKeepingData(user, pkg),
             renameBack = ShellCommands.renameBack(user, pkg),
+            restoreOwnership = ShellCommands.restoreOwnership(user, pkg),
             runbook = ShellCommands.fullRenameAsideRunbook(user, pkg),
         )
     }
@@ -288,6 +289,7 @@ class MainViewModel(private val application: Application) : ViewModel() {
         val uninstallEverywhere: String,
         val uninstallKeepData: String,
         val renameBack: String,
+        val restoreOwnership: String,
         val runbook: String,
     )
 

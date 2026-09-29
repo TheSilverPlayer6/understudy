@@ -119,6 +119,32 @@ class ShellCommandsTest {
     }
 
     @Test
+    fun `ownership repair targets the app uid and both roots`() {
+        val script = ShellCommands.restoreOwnership(user, pkg)
+
+        // The uid must be looked up at run time, never hardcoded: it differs per device and per
+        // install, and a wrong chown is worse than none.
+        assertTrue("dumpsys package $pkg" in script, script)
+        assertTrue("userId=" in script)
+        assertTrue("chown -R" in script)
+        assertTrue("/storage/emulated/$user/Android/data/$pkg" in script)
+        assertTrue("/storage/emulated/$user/Android/obb/$pkg" in script)
+        // 771 is what the platform itself uses for app-specific external dirs.
+        assertTrue("chmod 771" in script)
+        // A failure here must not abort a longer runbook.
+        assertTrue("|| true" in script)
+    }
+
+    @Test
+    fun `the runbook repairs ownership after restoring the directories`() {
+        val script = ShellCommands.fullRenameAsideRunbook(user, pkg)
+        val restore = script.indexOf("mv '/storage/emulated/$user/Android/data/$pkg${ShellCommands.BACKUP_SUFFIX}'")
+        val chown = script.indexOf("chown -R")
+        assertTrue(restore >= 0 && chown >= 0, "runbook is missing a step")
+        assertTrue(restore < chown, "ownership must be repaired AFTER the directories are back")
+    }
+
+    @Test
     fun `manual backend identifies itself`() {
         val backend = ManualShellBackend()
         assertEquals("manual", backend.id)
