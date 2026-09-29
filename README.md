@@ -1,5 +1,8 @@
 # Understudy
 
+> **Picking this up?** Start with [`HANDOFF.md`](HANDOFF.md) — current state, what is
+> verified, what remains, and exactly where the last session stopped.
+
 Reach an app's `Android/data` and `Android/obb` on Android 11+ — including from a **secondary
 user profile**, where the usual workarounds do not apply.
 
