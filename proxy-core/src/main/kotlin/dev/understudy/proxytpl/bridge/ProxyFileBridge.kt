@@ -149,6 +149,7 @@ class ProxyFileBridge : ContentProvider() {
         selectionArgs: Array<out String>?,
         sortOrder: String?,
     ): Cursor? {
+        enforceCaller()
         val r = requireOk(uri)
         val file = r.file
         if (!file.exists()) throw FileNotFoundException("no such entry: $uri")
@@ -199,6 +200,7 @@ class ProxyFileBridge : ContentProvider() {
      * get buffered in memory and transfer at essentially filesystem speed.
      */
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        enforceCaller()
         val file = requireOk(uri).file
         val fdMode = when (mode) {
             "r" -> ParcelFileDescriptor.MODE_READ_ONLY
@@ -235,6 +237,7 @@ class ProxyFileBridge : ContentProvider() {
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         val out = Bundle()
         try {
+            enforceCaller()
             when (method) {
                 BridgeContract.CALL_PING -> ping(out)
                 BridgeContract.CALL_LIST -> list(arg, extras, out)
@@ -565,6 +568,108 @@ class ProxyFileBridge : ContentProvider() {
         return Uri.parse(raw)
     }
 
+    // ---- caller authentication ---------------------------------------------
+
+    /**
+     * The SHA-256 of the certificate that must have signed whoever is calling us, or null when
+     * this proxy was generated without one.
+     *
+     * Read once from the asset the generator baked in. Cached because it is consulted on every
+     * provider call, and because the answer cannot change during the process's lifetime.
+     */
+    private val expectedGeneratorDigest: String? by lazy {
+        val ctx = context ?: return@lazy null
+        runCatching {
+            ctx.assets.open(GENERATOR_CERT_ASSET_NAME).use { it.readBytes() }
+                .toString(Charsets.US_ASCII).trim().lowercase()
+                .takeIf { it.length == DIGEST_HEX_LENGTH }
+        }.getOrNull()
+    }
+
+    /** Per-uid verdicts, so the certificate walk happens once per caller rather than per call. */
+    private val callerVerdicts = java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
+
+    /**
+     * Refuses callers that are not the Understudy install which generated this APK.
+     *
+     * Why a `signature`-level permission is not enough — this is the reason the check exists:
+     *
+     * The provider is guarded by `dev.understudy.permission.BRIDGE` at `protectionLevel=
+     * signature`, which the platform grants only when caller and provider share a signing
+     * certificate. In the CI and debug configuration they do, because both APKs are signed with
+     * the committed test key. In production they cannot: this APK is signed with a per-install
+     * key generated on the device, while Understudy is signed at build time with whatever key
+     * distributed it. So a signed release build would install a proxy that refuses every call
+     * from the app that made it — the app would appear broken for a reason no user could
+     * diagnose.
+     *
+     * The relationship that actually matters is not "same signer as me" but "signed by the
+     * certificate of the app that generated me", and only the generator knows that certificate.
+     * So it bakes the digest in, and we check the caller against it.
+     *
+     * The permission is kept: it costs nothing, it keeps the provider closed on builds where the
+     * digest asset is absent, and defence in depth is worth more than elegance here.
+     *
+     * Fail-closed on a malformed digest, fail-open only when there is no digest at all. A proxy
+     * that cannot authenticate its caller must not serve another package's files; a proxy built
+     * without a digest is a test artifact and behaves exactly as it did before.
+     */
+    private fun enforceCaller() {
+        val expected = expectedGeneratorDigest ?: return
+        val uid = android.os.Binder.getCallingUid()
+        // Our own process, and the platform acting on our behalf.
+        if (uid == android.os.Process.myUid() || uid == android.os.Process.SYSTEM_UID) return
+        val cached = callerVerdicts[uid]
+        if (cached != null) {
+            if (cached) return
+            throw SecurityException("caller uid $uid is not the Understudy install that generated this proxy")
+        }
+        val ok = runCatching { matchesGenerator(uid, expected) }.getOrDefault(false)
+        callerVerdicts[uid] = ok
+        if (!ok) {
+            Log.w(TAG, "refusing caller uid $uid: certificate does not match the generator")
+            throw SecurityException("caller uid $uid is not the Understudy install that generated this proxy")
+        }
+    }
+
+    /**
+     * True when some package behind [uid] is signed by the certificate whose SHA-256 is
+     * [expectedDigest].
+     *
+     * Uses [android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES] with the
+     * `SIGNING_CERTIFICATE_MATCHES` check rather than trusting a single reported signer: on a
+     * package with rotated keys the platform reports both the current and the originating
+     * certificate, and either is acceptable proof of who installed it.
+     */
+    private fun matchesGenerator(uid: Int, expectedDigest: String): Boolean {
+        val ctx = context ?: return false
+        val pm = ctx.packageManager
+        val packages = pm.getPackagesForUid(uid) ?: return false
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        for (pkg in packages) {
+            val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+            val signing = info.signingInfo ?: continue
+            val certs = when {
+                signing.hasMultipleSigners() -> signing.apkContentsSigners
+                else -> signing.signingCertificateHistory
+            }
+            for (sig in certs ?: emptyArray()) {
+                md.reset()
+                val digest = md.digest(sig.toByteArray())
+                if (toHex(digest) == expectedDigest) return true
+            }
+        }
+        return false
+    }
+
+    private fun toHex(bytes: ByteArray): String {
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            sb.append(HEX[(b.toInt() shr 4) and 0xf]).append(HEX[b.toInt() and 0xf])
+        }
+        return sb.toString()
+    }
+
     private fun requireOk(uri: Uri): BridgePaths.Resolution.Ok {
         val r = resolve(uri)
         if (r is BridgePaths.Resolution.Rejected) throw SecurityException(r.reason)
@@ -613,6 +718,11 @@ class ProxyFileBridge : ContentProvider() {
 
     companion object {
         private const val TAG = "UnderstudyBridge"
+
+        /** Must match `ProxyApkFactory.GENERATOR_CERT_ASSET_NAME`. */
+        private const val GENERATOR_CERT_ASSET_NAME = "understudy-generator-cert.sha256"
+        private const val DIGEST_HEX_LENGTH = 64
+        private val HEX = "0123456789abcdef".toCharArray()
 
         /** `UserHandle.PER_USER_RANGE` — inlined to avoid an API-level dependency. */
         private const val PER_USER_RANGE = 100000

@@ -57,8 +57,12 @@ class ProxyInstaller(private val context: Context) {
         ).apply {
             setSize(apk.length())
             // We never update a proxy in place across signature changes, but if we do update,
-            // keeping the data directories is the entire point of the exercise.
-            setDontKillApp(true)
+            // keeping the data directories is the entire point of the exercise. `setDontKillApp`
+            // only exists from API 34; below that the platform decides, and the flag is an
+            // optimisation rather than a correctness requirement.
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                setDontKillApp(true)
+            }
             // Helps the platform attribute the install; harmless if the file URI is opaque.
             setOriginatingUri(android.net.Uri.fromFile(apk))
         }
@@ -108,6 +112,7 @@ class ProxyInstaller(private val context: Context) {
      * checkbox — the only unprivileged way to preserve `Android/data/<pkg>` across an
      * uninstall. We cannot tick it for the user.
      */
+    @androidx.annotation.RequiresPermission(android.Manifest.permission.REQUEST_DELETE_PACKAGES)
     fun requestUninstall(packageName: String, resultIntent: PendingIntent) {
         installer.uninstall(packageName, resultIntent.intentSender)
     }

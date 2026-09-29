@@ -515,6 +515,34 @@ class BridgeIntegrationTest {
     }
 
     /**
+     * The caller check must be *off* when no generator digest was baked in.
+     *
+     * This is the configuration the whole test suite — and CI's premise run — depends on: the
+     * template asset carries no digest, so the proxy falls back to the `signature`-level
+     * permission alone. If enforcement were unconditional, every generated proxy in CI would
+     * refuse the app that made it and the premise test would fail for a reason that has nothing
+     * to do with FUSE.
+     *
+     * It also pins the fail-open decision explicitly, so it is a choice on the record rather
+     * than an accident: no digest means no additional check, and the permission still applies.
+     */
+    @Test
+    fun withNoGeneratorDigestTheProxyServesItsCaller() {
+        // The registered provider was built from the committed template, which has no digest.
+        val info = client.ping(context.packageName)
+        assertEquals(context.packageName, info.packageName)
+
+        // And ordinary operations work, i.e. nothing was refused.
+        val dir = File(dataRoot, "no-digest").apply { mkdirs() }
+        File(dir, "note.txt").writeText("hello")
+        val listed = client.list(StorageRoot.DATA, "no-digest").map { it.name }
+        assertTrue("note.txt" in listed, "expected the file to be listed, saw $listed")
+
+        val stated = client.statPath(StorageRoot.DATA, "no-digest/note.txt")
+        assertTrue(stated.exists, "statPath should see the file: $stated")
+    }
+
+    /**
      * The contract is duplicated on purpose — `:proxy-core` must stay dependency-free, so it
      * cannot share a module with `:app`. That duplication is exactly the kind of thing that
      * drifts silently: a renamed method string on one side turns every call into "unknown

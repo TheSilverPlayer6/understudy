@@ -6,6 +6,7 @@ import java.util.zip.ZipFile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -226,6 +227,92 @@ class ProxyApkFactoryTest {
         }
         return -1
     }
+
+    /**
+     * The generator's certificate digest must travel inside the APK, at the exact asset path the
+     * proxy reads.
+     *
+     * This is what makes a *signed release build* workable at all. The provider is guarded by a
+     * `signature`-level permission, which requires caller and provider to share a certificate —
+     * impossible in production, where the proxy is signed with a per-install key and the app with
+     * its build-time key. The proxy therefore authenticates its caller against this digest
+     * instead, and if the asset name or path drifts on either side the proxy silently loses the
+     * ability to tell its creator from a stranger.
+     */
+    @Test
+    fun `the generator certificate digest is baked in at the path the proxy reads`() {
+        val template = templateApk()
+        if (template == null) {
+            System.err.println("SKIP: no proxy template APK found")
+            return
+        }
+        val digest = "a".repeat(64)
+        val apk = ProxyApkFactory(SigningIdentity.generate()).generate(
+            template.readBytes(),
+            "com.example.targetgame",
+            generatorCertificateSha256Hex = digest,
+        )
+
+        ZipFile(tmp(apk.bytes)).use { zip ->
+            val entry = zip.getEntry(ProxyApkFactory.GENERATOR_CERT_ASSET)
+            assertNotNull(
+                entry,
+                "generated APK must carry ${ProxyApkFactory.GENERATOR_CERT_ASSET}; the proxy " +
+                    "reads it to authenticate its caller",
+            )
+            assertEquals(digest, zip.getInputStream(entry).readBytes().toString(Charsets.US_ASCII))
+
+            // The asset must be covered by the v1 (JAR) signature. An entry added after
+            // MANIFEST.MF was computed installs on some platforms and fails verification on
+            // others, which is the worst kind of bug to ship.
+            val manifest = zip.getEntry("META-INF/MANIFEST.MF")
+            assertNotNull(manifest, "generated APK should carry a v1 manifest")
+            val text = zip.getInputStream(manifest).readBytes().toString(Charsets.US_ASCII)
+            val covered = text.lineSequence()
+                .filter { it.startsWith("Name: ") }
+                .map { it.removePrefix("Name: ").trim() }
+                .toSet()
+            assertTrue(
+                ProxyApkFactory.GENERATOR_CERT_ASSET in covered,
+                "the generator-cert asset must be signed like every other entry; MANIFEST.MF " +
+                    "covers ${covered.size} entries",
+            )
+        }
+    }
+
+    @Test
+    fun `a malformed generator digest is rejected rather than baked in`() {
+        val template = templateApk() ?: return
+        val factory = ProxyApkFactory(SigningIdentity.generate())
+        val bytes = template.readBytes()
+        for (bad in listOf("", "abc", "z".repeat(64), "A".repeat(63))) {
+            val error = runCatching {
+                factory.generate(bytes, "com.example.targetgame", generatorCertificateSha256Hex = bad)
+            }.exceptionOrNull()
+            assertNotNull(error, "digest '$bad' must be rejected")
+        }
+    }
+
+    @Test
+    fun `omitting the digest leaves the asset out so test builds keep working`() {
+        val template = templateApk() ?: return
+        val apk = ProxyApkFactory(SigningIdentity.generate()).generate(
+            template.readBytes(),
+            "com.example.targetgame",
+        )
+        ZipFile(tmp(apk.bytes)).use { zip ->
+            assertNull(
+                zip.getEntry(ProxyApkFactory.GENERATOR_CERT_ASSET),
+                "without a digest the proxy must fall back to permission-only enforcement",
+            )
+        }
+    }
+
+    private fun tmp(bytes: ByteArray): File =
+        File.createTempFile("proxy-gen", ".apk").apply {
+            writeBytes(bytes)
+            deleteOnExit()
+        }
 }
 
 /** Tiny indirection so the test does not need the main source set's internal visibility. */

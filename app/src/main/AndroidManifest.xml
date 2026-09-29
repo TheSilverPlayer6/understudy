@@ -10,6 +10,17 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!--
+      Needed to launch the system uninstall dialog for the proxy. This is the *request* flavour,
+      not DELETE_PACKAGES (which is signature|privileged and unobtainable): it shows the user the
+      confirmation dialog and nothing happens without them.
+
+      It matters more than a normal uninstall because the proxy declares
+      `hasFragileUserData="true"`, which makes THIS dialog the only unprivileged place where
+      "Keep app data" is offered — the one route to a data-preserving uninstall with no shell.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
+    <!--
       Required to reach the proxy's exported provider, which is guarded by this signature-level
       permission. The grant is automatic — no user prompt — *provided both APKs are signed with
       the same key*, which is why the signing identity has to stay stable across runs.

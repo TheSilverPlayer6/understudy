@@ -55,8 +55,18 @@ class ProxyApkFactory(private val identity: SigningIdentity) {
     /**
      * @param templateApk the built `:proxy` APK, read from assets
      * @param targetPackage the package whose private storage should become reachable
+     * @param generatorCertificateSha256Hex SHA-256 of the certificate belonging to the app that
+     *   is generating this APK — i.e. Understudy itself, not [identity]. Baked into the proxy as
+     *   an asset so the proxy can authenticate its caller; see `ProxyFileBridge` and the note on
+     *   [GENERATOR_CERT_ASSET] for why a `signature`-level permission cannot do this job.
+     *   When null the asset is omitted and the proxy falls back to permission-only enforcement,
+     *   which is what the CI/test configuration relies on.
      */
-    fun generate(templateApk: ByteArray, targetPackage: String): ProxyApk {
+    fun generate(
+        templateApk: ByteArray,
+        targetPackage: String,
+        generatorCertificateSha256Hex: String? = null,
+    ): ProxyApk {
         val template = readZip(templateApk)
 
         val manifest = template["AndroidManifest.xml"]
@@ -76,6 +86,17 @@ class ProxyApkFactory(private val identity: SigningIdentity) {
             if (name in ordered) continue
             if (isDroppable(name)) continue
             ordered[name] = data
+        }
+        // The caller identity goes in as a plain asset. Assets need no resources.arsc entry —
+        // which matters, because the arsc is deliberately dropped — and AssetManager reads them
+        // by name, so the proxy can pick this up with no build-time plumbing at all.
+        if (generatorCertificateSha256Hex != null) {
+            val hex = generatorCertificateSha256Hex.trim().lowercase()
+            require(hex.length == 64 && hex.all { it in '0'..'9' || it in 'a'..'f' }) {
+                "generator certificate digest must be 64 hex characters, got " +
+                    "${generatorCertificateSha256Hex.length}"
+            }
+            ordered[GENERATOR_CERT_ASSET] = hex.toByteArray(Charsets.US_ASCII)
         }
 
         val entries = ordered.map { (name, data) ->
@@ -167,4 +188,25 @@ class ProxyApkFactory(private val identity: SigningIdentity) {
         java.security.MessageDigest.getInstance("SHA-256")
             .digest(data)
             .joinToString("") { "%02x".format(it) }
+
+    companion object {
+        /**
+         * Where the generator's certificate digest travels inside the APK.
+         *
+         * Why this exists: the bridge provider is guarded by a `signature`-level permission,
+         * which the platform grants only when the caller and the *provider* share a signing
+         * certificate. In production they cannot. The proxy is signed with a per-install
+         * [SigningIdentity] key generated on the device, while Understudy is signed at build
+         * time with whatever key distributed it — so a release build would install a proxy that
+         * refuses every call from the app that made it. The permission is still worth keeping
+         * (it costs nothing, and covers the CI/debug configuration where both APKs really do
+         * share the committed test key), but it cannot be the only check. This asset lets the
+         * proxy verify the caller against the certificate of the app that generated it, which
+         * is the relationship that actually matters.
+         */
+        const val GENERATOR_CERT_ASSET = "assets/understudy-generator-cert.sha256"
+
+        /** The same path as the proxy reads it, without the zip entry's `assets/` prefix. */
+        const val GENERATOR_CERT_ASSET_NAME = "understudy-generator-cert.sha256"
+    }
 }
