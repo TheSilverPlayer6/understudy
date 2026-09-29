@@ -16,6 +16,12 @@ captures/
 *.jks
 *.pk8
 
+# The operator's RELEASE signing credentials. A release key in the repo is a release key in
+# every clone, so app/build.gradle.kts reads it from here and leaves release unsigned when
+# the file is absent. (keystore/understudy-test.p12 IS committed on purpose: it is a public
+# test identity, force-added past the *.p12-less ignore rules above.)
+keystore.properties
+
 # Secrets and sandbox state
 keys/
 .secrets/
