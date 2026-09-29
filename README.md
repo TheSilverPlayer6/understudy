@@ -124,10 +124,30 @@ compiled and unit-tested normally. Its release APK is committed at
 `app/src/main/assets/proxy-template.apk`. At runtime:
 
 1. read the template's binary `AndroidManifest.xml`;
-2. rewrite the string pool so `dev.understudy.proxytpl` → the target package. This is a **prefix**
-   substitution, which also retargets `authorities` and the fully-qualified component names
-   (aapt resolved those against the manifest package at build time, so they do not follow the
-   package on their own). `dev.understudy.permission.BRIDGE` is deliberately preserved;
+2. rewrite the string pool so `dev.understudy.proxytpl` → the target package. This is an **exact
+   match on the bare package string**, which retargets both the `<manifest package>` attribute
+   and the provider's `authorities` in one substitution — the AXML pool is deduplicated, so both
+   attributes share a single string index.
+
+   Fully-qualified component names are deliberately **left alone**. aapt resolved them against
+   the template package at build time, so they read `dev.understudy.proxytpl.bridge.ProxyFileBridge`
+   — and that is still the class the dex contains. A component class's package has no obligation
+   to match the application's package, so rewriting those names makes PackageManager look for a
+   class that does not exist and the proxy dies at process start:
+
+   ```
+   RuntimeException: Unable to get provider com.example.targetgame.bridge.ProxyFileBridge:
+     ClassNotFoundException: Didn't find class "com.example.targetgame.bridge.ProxyFileBridge"
+   ```
+
+   `dev.understudy.permission.BRIDGE` is preserved for the same class of reason: both sides of
+   the `signature`-level grant must agree on the name.
+
+   > This was gotten wrong once, and the JVM test suite passed while asserting the buggy
+   > behaviour — the string-pool tests checked that component names *were* rewritten. Only an
+   > emulator run caught it, because Robolectric registers providers by class reference and never
+   > resolves the name through PackageManager. `ManifestPatcher` now fails loudly if the number
+   > of identity strings in the template ever changes;
 3. repack `AndroidManifest.xml` + `classes*.dex` into an aligned ZIP, dropping `resources.arsc`,
    `META-INF/` and the Kotlin metadata;
 4. sign with v1 + v2 using a key generated on first run and persisted thereafter.

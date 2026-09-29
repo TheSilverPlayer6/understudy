@@ -158,7 +158,14 @@ class ProxyApkFactoryTest {
 
         assertTrue(a.bytes.contentEquals(b.bytes).not(), "two different targets produced identical APKs")
         assertEquals(a.manifestReplacements.size, b.manifestReplacements.size)
-        assertEquals(3, a.manifestReplacements.size, "expected package + provider + activity")
+        // One substitution: the deduplicated pool entry holding the bare package name, which
+        // serves as both the <manifest package> attribute and the provider authority. Component
+        // class names deliberately do NOT move — the dex keeps the template's classes.
+        assertEquals(
+            dev.understudy.packaging.axml.ManifestPatcher.EXPECTED_IDENTITY_STRINGS,
+            a.manifestReplacements.size,
+            "unexpected number of manifest substitutions: ${a.manifestReplacements}",
+        )
 
         // Deterministic: same key, same target => same bytes. This is what makes the
         // generated APK cacheable and its hash a stable identity for a session.

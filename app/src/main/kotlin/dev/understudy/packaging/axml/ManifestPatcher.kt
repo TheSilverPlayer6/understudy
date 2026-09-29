@@ -4,35 +4,58 @@ package dev.understudy.packaging.axml
  * Rewrites a proxy template's binary `AndroidManifest.xml` so that it claims a different
  * package identity.
  *
- * Three things carry the identity, and all three live in the string pool:
+ * Exactly **two** strings carry the identity, and both are the bare package name:
  *
  *  1. the `package` attribute on `<manifest>` — this is what makes the platform treat
  *     `/Android/data/<target>` as *ours*, which is the entire mechanism;
- *  2. `android:authorities` on the bridge provider — kept equal to the package name so a
- *     single substitution retargets it, and so Understudy can predict the authority;
- *  3. fully-qualified component `name` attributes — aapt resolves a leading-dot name
- *     against the manifest package at build time, so by the time we see the AXML these are
- *     absolute (`dev.understudy.proxytpl.bridge.ProxyFileBridge`). They must be rewritten
- *     too, otherwise PackageManager looks for a class that does not exist and the proxy
- *     crashes on first contact.
+ *  2. `android:authorities` on the bridge provider — deliberately equal to the package name, so
+ *     one exact-match substitution retargets both and Understudy can always predict the
+ *     authority.
  *
- * A **prefix** replacement handles all three. Note what it deliberately does *not* touch:
- * the permission name `dev.understudy.permission.BRIDGE`, which must stay identical in the
- * proxy and in Understudy for the `signature`-level grant to line up.
+ * Everything else is left alone, and that includes the **fully-qualified component `name`
+ * attributes**. This is counter-intuitive and was gotten wrong once, with a JVM test suite that
+ * passed while asserting the wrong behaviour:
  *
- * The dex is left alone: its class descriptors still say `Ldev/understudy/proxytpl/...`,
- * which is correct and harmless — a class's own package need not match the app's.
+ * aapt does resolve a leading-dot component name against the manifest package at build time, so
+ * by the time we see the AXML the name is absolute
+ * (`dev.understudy.proxytpl.bridge.ProxyFileBridge`). It is tempting to conclude that renaming
+ * the package means those must be renamed too. They must not: a component class's own package has
+ * no obligation to match the application's package. The dex still contains
+ * `Ldev/understudy/proxytpl/bridge/ProxyFileBridge;`, so rewriting the manifest name makes
+ * PackageManager look for a class that does not exist and the proxy dies at process start with
+ *
+ * ```
+ * RuntimeException: Unable to get provider com.example.targetgame.bridge.ProxyFileBridge:
+ *   ClassNotFoundException: Didn't find class "com.example.targetgame.bridge.ProxyFileBridge"
+ * ```
+ *
+ * Only a real device shows this. Robolectric registers the provider by class reference, so it
+ * never resolves the name through PackageManager, and the string-pool tests were asserting the
+ * buggy expectation.
+ *
+ * So the rule is **exact match only**: replace a pool string iff it *equals* the template
+ * package. That naturally spares the permission name `dev.understudy.permission.BRIDGE` (which
+ * must stay identical in both APKs for the `signature`-level grant to line up) and the component
+ * names, without either needing a special case.
  */
 object ManifestPatcher {
 
-    /** The template's `applicationId`, i.e. the prefix that gets substituted. */
+    /** The template's `applicationId`, i.e. the string that gets substituted. */
     const val TEMPLATE_PACKAGE: String = "dev.understudy.proxytpl"
 
     /**
-     * Names that must survive a rename because both sides of the signature-permission
-     * handshake have to agree on them.
+     * How many pool entries the bare package name occupies in the template manifest: **one**.
+     *
+     * Not two, which is what you would guess from there being two attributes that use it
+     * (`<manifest package>` and the provider's `android:authorities`). The AXML string pool is
+     * deduplicated, so both attributes hold the same string *index* and a single substitution
+     * retargets both — which is exactly why the authority is set to `${applicationId}` in the
+     * template manifest.
+     *
+     * If this count ever changes, the template drifted and the proxy would install under an
+     * identity the app cannot predict, so `rename` fails loudly instead.
      */
-    private val PRESERVE_SUBSTRINGS = listOf("dev.understudy.permission.")
+    const val EXPECTED_IDENTITY_STRINGS: Int = 1
 
     class Result(
         val bytes: ByteArray,
@@ -50,28 +73,28 @@ object ManifestPatcher {
         val doc = AxmlStringPool.parse(manifest)
         val replacements = ArrayList<Pair<String, String>>()
 
+        var replaced = 0
         for (i in doc.strings.indices) {
-            val original = doc.strings[i]
-            if (!original.startsWith(TEMPLATE_PACKAGE)) continue
-            if (PRESERVE_SUBSTRINGS.any { it in original }) continue
-
-            // Swap the prefix, keep the suffix: "" -> package itself,
-            // ".bridge.ProxyFileBridge" -> "<target>.bridge.ProxyFileBridge".
-            val suffix = original.removePrefix(TEMPLATE_PACKAGE)
-            val updated = targetPackage + suffix
-            if (updated != original) {
-                doc.strings[i] = updated
-                replacements += original to updated
-            }
+            // EXACT match, not prefix. See the class documentation: a prefix substitution also
+            // rewrites fully-qualified component names, and those classes do not move in the
+            // dex, so the proxy would fail to start with a ClassNotFoundException.
+            if (doc.strings[i] != TEMPLATE_PACKAGE) continue
+            if (targetPackage == TEMPLATE_PACKAGE) continue
+            doc.strings[i] = targetPackage
+            replacements += TEMPLATE_PACKAGE to targetPackage
+            replaced++
         }
 
-        require(replacements.isNotEmpty()) {
-            "template manifest contains no '$TEMPLATE_PACKAGE' strings — wrong asset?"
+        // Fail here rather than emitting an APK that only a device will reject: a wrong count
+        // means the template drifted and the proxy would install under an identity the app
+        // cannot predict, or not be reachable at all.
+        require(replaced > 0) {
+            "template manifest contains no bare '$TEMPLATE_PACKAGE' string — wrong asset?"
         }
-        // The `package` attribute and the provider authority must both have moved; if only
-        // one did, the template drifted and the proxy would be unreachable.
-        require(replacements.any { it.second == targetPackage }) {
-            "rename did not produce a bare '$targetPackage' string (package/authority)"
+        require(replaced == EXPECTED_IDENTITY_STRINGS) {
+            "expected the bare package name to appear $EXPECTED_IDENTITY_STRINGS times " +
+                "(package attribute + provider authority) but found $replaced. The template " +
+                "manifest changed shape; re-check which attributes reference it."
         }
 
         val pool = AxmlStringPool.encodePool(doc)

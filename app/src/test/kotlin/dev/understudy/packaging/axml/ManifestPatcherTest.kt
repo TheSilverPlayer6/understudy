@@ -56,22 +56,32 @@ class ManifestPatcherTest {
     }
 
     @Test
-    fun `rename rewrites package, authority and component names but not the permission`() {
+    fun `rename rewrites package and authority but leaves component names and the permission`() {
         val result = ManifestPatcher.rename(template(), "com.example.targetgame")
         val doc = AxmlStringPool.parse(result.bytes)
 
-        // 1. the manifest package attribute
+        // 1. the manifest package attribute AND the provider authority both become the target
         assertTrue("com.example.targetgame" in doc.strings) {
             "bare target package missing (package attr / provider authority)"
         }
-        // 2. fully-qualified component names follow the new prefix
-        assertTrue("com.example.targetgame.bridge.ProxyFileBridge" in doc.strings)
-        assertTrue("com.example.targetgame.ProxyStatusActivity" in doc.strings)
-        // 3. nothing of the old identity survives
-        assertTrue(doc.strings.none { it.startsWith(ManifestPatcher.TEMPLATE_PACKAGE) }) {
-            "stale template strings remain: ${doc.strings.filter { it.startsWith("dev.understudy.proxytpl") }}"
+
+        // 2. Component names must NOT move. This is the assertion that a real device forced us
+        //    to invert: the dex still contains Ldev/understudy/proxytpl/bridge/ProxyFileBridge;,
+        //    so rewriting the manifest name makes PackageManager look for a class that does not
+        //    exist and the proxy dies at process start with
+        //    "Unable to get provider ... ClassNotFoundException". A component class's package has
+        //    no obligation to match the application's package.
+        assertTrue("dev.understudy.proxytpl.bridge.ProxyFileBridge" in doc.strings) {
+            "provider class name was rewritten; the dex still has the old name"
         }
-        // 4. the permission name is shared with :app on purpose and must NOT move
+        assertTrue("dev.understudy.proxytpl.ProxyStatusActivity" in doc.strings) {
+            "activity class name was rewritten; the dex still has the old name"
+        }
+        assertTrue(doc.strings.none { it == "com.example.targetgame.bridge.ProxyFileBridge" }) {
+            "component names must not follow the package rename"
+        }
+
+        // 3. the permission name is shared with :app on purpose and must NOT move
         assertTrue("dev.understudy.permission.BRIDGE" in doc.strings) {
             "permission name was rewritten; the signature-level grant would break"
         }
@@ -114,20 +124,39 @@ class ManifestPatcherTest {
         val out = ManifestPatcher.rename(template(), long).bytes
         val doc = AxmlStringPool.parse(out)
         assertTrue(long in doc.strings)
-        assertTrue("$long.bridge.ProxyFileBridge" in doc.strings)
+        // component names still point at the template package
+        assertTrue("dev.understudy.proxytpl.bridge.ProxyFileBridge" in doc.strings)
         assertEquals(out.size, readU32(out, 4))
     }
 
     @Test
     fun `rename reports exactly which strings moved`() {
         val result = ManifestPatcher.rename(template(), "com.foo.bar")
-        val moved = result.replacedStrings.toMap()
-        assertEquals("com.foo.bar", moved[ManifestPatcher.TEMPLATE_PACKAGE])
+
+        // Exactly ONE pool entry holds the bare package name, because the AXML string pool is
+        // deduplicated: the <manifest package> attribute and the provider's android:authorities
+        // share the same string index, so one substitution retargets both. Anything else moving
+        // is a bug, and anything else *needing* to move means the template drifted.
         assertEquals(
-            "com.foo.bar.bridge.ProxyFileBridge",
-            moved["dev.understudy.proxytpl.bridge.ProxyFileBridge"],
+            ManifestPatcher.EXPECTED_IDENTITY_STRINGS,
+            result.replacedStrings.size,
+            "expected only the package attribute and the authority to move, got ${result.replacedStrings}",
         )
-        assertEquals(3, moved.size, "expected package + provider + activity, got $moved")
+        assertTrue(
+            result.replacedStrings.all { (from, to) ->
+                from == ManifestPatcher.TEMPLATE_PACKAGE && to == "com.foo.bar"
+            },
+            "unexpected substitution: ${result.replacedStrings}",
+        )
+    }
+
+    @Test
+    fun `renaming to the template package itself is rejected`() {
+        // A no-op rename would produce an APK that collides with the template's own identity.
+        // The patcher treats it as "nothing to substitute" rather than emitting a confusing APK.
+        assertFailsWith<IllegalArgumentException> {
+            ManifestPatcher.rename(template(), ManifestPatcher.TEMPLATE_PACKAGE)
+        }
     }
 
     @Test

@@ -10,10 +10,12 @@
 // generated APK's classes.dex, which is installed standalone:
 //   * ZERO dependencies. Framework APIs only: no androidx, no Kotlin stdlib extras beyond what
 //     the compiler adds, no Compose, no resources.
-//   * The CLASS package MUST stay `dev.understudy.proxytpl`. ManifestPatcher re-targets the
-//     binary manifest by prefix-substituting that string, which is what makes the
-//     fully-qualified component names follow the new package. Renaming the classes silently
-//     breaks proxy installation with a ClassNotFoundException at first contact.
+//   * The class package is `dev.understudy.proxytpl` and the manifest's component names point
+//     at it. Those names are deliberately NOT rewritten when the proxy is re-targeted: the dex
+//     keeps whatever classes were compiled, and a component class's package has no obligation to
+//     match the application's package. ManifestPatcher therefore substitutes only the *bare*
+//     package string (the `<manifest package>` attribute and the provider authority). If you
+//     rename this package, regenerate the template asset — the manifest is built from it.
 //   * The module NAMESPACE, by contrast, must be unique across modules (AGP refuses to merge
 //     two modules sharing one), so it is `…proxycore`. Namespace only governs BuildConfig and
 //     the R class — neither of which this module has — so it does not affect the class names
