@@ -244,6 +244,7 @@ class ProxyFileBridge : ContentProvider() {
                 BridgeContract.CALL_RENAME -> rename(extras, out)
                 BridgeContract.CALL_STAT_TREE -> statTree(extras, out)
                 BridgeContract.CALL_WIPE_SELF -> wipeSelf(extras, out)
+                BridgeContract.CALL_STAT_PATH -> statPath(extras, out)
                 BridgeContract.CALL_SELF_DIAGNOSTIC -> selfDiagnostic(out)
                 BridgeContract.CALL_HIDE_LAUNCHER -> setLauncherEnabled(false, out)
                 BridgeContract.CALL_SHOW_LAUNCHER -> setLauncherEnabled(true, out)
@@ -411,6 +412,40 @@ class ProxyFileBridge : ContentProvider() {
      * Deliberately read-only apart from that scratch dir, and it never exposes another
      * package's data: every path it touches is under this package's own two roots.
      */
+    /**
+     * Reports what THIS process's filesystem calls say about one path under its roots.
+     *
+     * The reason this method exists is a hole in the premise test that survived until the very
+     * last CI run. The test wrote a file through the bridge, read it back through the bridge,
+     * and then tried to confirm the bytes were real with
+     * `File("/storage/emulated/<user>/Android/data/<target>/…").isFile` — from the TEST APP's
+     * uid. That can never be true: the platform hides the target's private directory from every
+     * other package, which is precisely the restriction this project works around. The same
+     * suite asserts that hiding in `thePlatformStillHidesOtherPackagesPrivateStorageFromUs`, so
+     * the two tests contradicted each other and only one of them could pass.
+     *
+     * "Did my write land on the real filesystem?" is therefore only answerable from inside the
+     * proxy. This answers it with the proxy's own `File` calls, and returns the length as well
+     * as existence so a caller can compare against what it wrote.
+     *
+     * Path handling is identical to every other call: [requireOk] resolves through
+     * [BridgePaths], so the same traversal rules apply and nothing outside the two roots is
+     * reachable — including by this method, which reports sizes and would otherwise be a
+     * modest oracle.
+     */
+    private fun statPath(extras: Bundle?, out: Bundle) {
+        val uri = extras?.let { extrasUri(it) } ?: throw IllegalArgumentException("missing path")
+        val r = requireOk(uri)
+        val file = r.file
+        out.putBoolean(BridgeContract.KEY_OK, true)
+        out.putBoolean(BridgeContract.KEY_EXISTS, file.exists())
+        out.putBoolean(BridgeContract.KEY_IS_DIRECTORY, file.isDirectory)
+        out.putLong(BridgeContract.KEY_SIZE, if (file.isFile) file.length() else -1L)
+        // The canonical path is what makes this verifiable rather than a matter of trust: it is
+        // the real location the platform gave us, not a restatement of the caller's input.
+        out.putString(BridgeContract.KEY_PATH, runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
+    }
+
     private fun selfDiagnostic(out: Bundle) {
         val sb = StringBuilder()
         val uid = android.os.Process.myUid()

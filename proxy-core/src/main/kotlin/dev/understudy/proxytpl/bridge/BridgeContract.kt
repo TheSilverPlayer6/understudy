@@ -63,6 +63,15 @@ object BridgeContract {
     const val CALL_SHOW_LAUNCHER: String = "showLauncher"
 
     /**
+     * Returns what the proxy's own filesystem calls say about one path under its roots.
+     *
+     * This exists because a caller outside the proxy CANNOT verify that a write landed on the
+     * real filesystem: `/Android/data/<target>` is hidden from every other package by design,
+     * which is the entire premise. "Is it really there?" is only answerable from inside.
+     */
+    const val CALL_STAT_PATH: String = "statPath"
+
+    /**
      * Returns a text report of what the proxy sees of its OWN two roots.
      *
      * Only the proxy can answer that question: the app runs as a different uid, for which
@@ -89,6 +98,10 @@ object BridgeContract {
     const val KEY_USER: String = "user"
     const val KEY_ERROR: String = "error"
     const val KEY_DIAGNOSTIC: String = "diagnostic"
+    const val KEY_EXISTS: String = "exists"
+    const val KEY_IS_DIRECTORY: String = "isDirectory"
+    const val KEY_SIZE: String = "sizeBytes"
+    const val KEY_PATH: String = "canonicalPath"
     const val KEY_ROOTS: String = "roots"
     const val KEY_ENTRIES: String = "entryCount"
     const val KEY_BYTES: String = "bytes"

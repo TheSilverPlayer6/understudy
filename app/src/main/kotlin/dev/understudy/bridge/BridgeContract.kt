@@ -33,6 +33,7 @@ object BridgeContract {
     const val CALL_HIDE_LAUNCHER: String = "hideLauncher"
     const val CALL_SHOW_LAUNCHER: String = "showLauncher"
     const val CALL_SELF_DIAGNOSTIC: String = "selfDiagnostic"
+    const val CALL_STAT_PATH: String = "statPath"
 
     const val ARG_PATH: String = "path"
     const val ARG_TARGET: String = "target"
@@ -46,6 +47,10 @@ object BridgeContract {
     const val KEY_USER: String = "user"
     const val KEY_ERROR: String = "error"
     const val KEY_DIAGNOSTIC: String = "diagnostic"
+    const val KEY_EXISTS: String = "exists"
+    const val KEY_IS_DIRECTORY: String = "isDirectory"
+    const val KEY_SIZE: String = "sizeBytes"
+    const val KEY_PATH: String = "canonicalPath"
     const val KEY_ROOTS: String = "roots"
     const val KEY_ENTRIES: String = "entryCount"
     const val KEY_BYTES: String = "bytes"

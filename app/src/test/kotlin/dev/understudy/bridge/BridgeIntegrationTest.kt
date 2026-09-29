@@ -474,6 +474,47 @@ class BridgeIntegrationTest {
     }
 
     /**
+     * `statPath` is how a caller confirms a write reached the real filesystem.
+     *
+     * It matters more than a convenience method: from outside the proxy there is NO way to
+     * check, because the platform hides `Android/data/<target>` from every other package. The
+     * premise test used to stat the path from the test app's uid and could therefore never pass
+     * — it asserted both that the directory was hidden and that it could read a file inside it.
+     */
+    @Test
+    fun `statPath reports what the proxy itself sees`() {
+        val dir = File(dataRoot, "statted").apply { mkdirs() }
+        val file = File(dir, "note.txt").apply { writeText("0123456789") }
+        assertTrue(file.isFile, "fixture should exist")
+
+        val present = client.statPath(StorageRoot.DATA, "statted/note.txt")
+        assertTrue(present.exists, "the proxy should see a file that is on disk: $present")
+        assertFalse(present.isDirectory)
+        assertEquals(10L, present.sizeBytes)
+        assertNotNull(present.canonicalPath)
+        assertTrue(
+            present.canonicalPath!!.endsWith("statted/note.txt"),
+            "canonical path should be the real location: ${present.canonicalPath}",
+        )
+
+        val asDir = client.statPath(StorageRoot.DATA, "statted")
+        assertTrue(asDir.exists && asDir.isDirectory, "a directory should report as one: $asDir")
+        assertEquals(-1L, asDir.sizeBytes, "directories have no byte count")
+
+        val absent = client.statPath(StorageRoot.DATA, "statted/not-here.txt")
+        assertFalse(absent.exists, "a missing entry must not report as present: $absent")
+    }
+
+    @Test
+    fun `statPath refuses to look outside the roots`() {
+        // It reports sizes, so it would be a small oracle if it could be pointed anywhere.
+        for (path in listOf("../etc/passwd", "/absolute", "a/../../b")) {
+            val error = runCatching { client.statPath(StorageRoot.DATA, path) }.exceptionOrNull()
+            assertNotNull(error, "'$path' must be rejected")
+        }
+    }
+
+    /**
      * The contract is duplicated on purpose — `:proxy-core` must stay dependency-free, so it
      * cannot share a module with `:app`. That duplication is exactly the kind of thing that
      * drifts silently: a renamed method string on one side turns every call into "unknown

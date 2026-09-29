@@ -277,11 +277,44 @@ class BridgePremiseTest {
         }
         assertEquals(payload, String(viaBridge))
 
-        // ...and confirm it is a real file at the path the platform documents, not something
-        // the provider invented. This is what makes the round trip meaningful.
-        val expected = File("/storage/emulated/${myUserId()}/Android/data/$target/$path")
-        assertTrue(expected.isFile, "expected a real file at ${expected.absolutePath}")
-        assertEquals(payload, expected.readText())
+        // ...and confirm it is a real file, not something the provider invented. This is what
+        // makes the round trip meaningful.
+        //
+        // The confirmation has to come FROM THE PROXY. This test used to stat the path itself:
+        //   File("/storage/emulated/<user>/Android/data/$target/$path").isFile
+        // which can never be true, because the platform hides the target's private directory
+        // from every other package — the very restriction
+        // [thePlatformStillHidesOtherPackagesPrivateStorageFromUs] asserts two tests below. The
+        // two tests contradicted each other and only one could ever pass.
+        //
+        // So: ask the process that owns the directory. It reports the canonical path the
+        // platform resolved plus the byte count, which together are stronger evidence than a
+        // local stat would have been — a local stat could only ever prove the file was visible
+        // to us, not that it exists where the platform says it does.
+        val stated = client().statPath(StorageRoot.DATA, path)
+        assertTrue(
+            stated.exists && !stated.isDirectory,
+            "the proxy does not see a file it just wrote: $stated",
+        )
+        assertEquals(
+            payload.toByteArray().size.toLong(),
+            stated.sizeBytes,
+            "byte count on disk disagrees with what was written: $stated",
+        )
+        val canonical = stated.canonicalPath
+        assertNotNull(canonical, "the proxy reported no canonical path")
+        assertTrue(
+            canonical!!.contains("/Android/data/$target/"),
+            "the file landed outside the target's private storage: $canonical",
+        )
+        assertTrue(
+            canonical.endsWith("/$PLANTED_DIR/written-by-test.txt"),
+            "unexpected canonical path: $canonical",
+        )
+
+        // And the directory listing agrees, so this is not a one-off stat artifact.
+        val siblings = client().list(StorageRoot.DATA, PLANTED_DIR).map { it.name }
+        assertTrue("written-by-test.txt" in siblings, "not in the directory listing: $siblings")
     }
 
     // ---- 3. the restriction we are working around is real -------------------

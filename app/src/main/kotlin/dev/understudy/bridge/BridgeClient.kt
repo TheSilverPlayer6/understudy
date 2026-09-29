@@ -210,6 +210,27 @@ class BridgeClient(
     }.getOrDefault(false)
 
     /**
+     * What the proxy's own filesystem calls report about [relativePath].
+     *
+     * The only way to confirm that a write through the bridge landed on the real filesystem. A
+     * caller outside the proxy cannot check for itself: the platform hides
+     * `Android/data/<target>` from every other package, which is the premise this whole project
+     * is built on. Asking the proxy is not a weaker form of verification — it is the only form
+     * available, and it reports the canonical path the platform resolved, not an echo of the
+     * input.
+     */
+    fun statPath(root: StorageRoot, relativePath: String): PathStat {
+        validate(relativePath)
+        val result = call(BridgeContract.CALL_STAT_PATH, pathArgs(root, relativePath))
+        return PathStat(
+            exists = result.getBoolean(BridgeContract.KEY_EXISTS, false),
+            isDirectory = result.getBoolean(BridgeContract.KEY_IS_DIRECTORY, false),
+            sizeBytes = result.getLong(BridgeContract.KEY_SIZE, -1L),
+            canonicalPath = result.getString(BridgeContract.KEY_PATH),
+        )
+    }
+
+    /**
      * Asks the proxy to describe what IT sees of its own two roots.
      *
      * The app cannot answer this for itself: it runs as a different uid, for which the target's
@@ -304,3 +325,13 @@ class BridgeClient(
         val MODES = setOf("r", "w", "wa", "rw")
     }
 }
+
+/** The proxy's own view of one path under its roots. See [BridgeClient.statPath]. */
+data class PathStat(
+    val exists: Boolean,
+    val isDirectory: Boolean,
+    /** Real byte count for a file, -1 for a directory or a missing entry. */
+    val sizeBytes: Long,
+    /** What the platform resolved the path to, inside the proxy's mount namespace. */
+    val canonicalPath: String?,
+)
