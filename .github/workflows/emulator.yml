@@ -5,11 +5,11 @@
 # That claim is about the kernel's FUSE layer, so no JVM test can cover it. This workflow is the
 # only place in the project where it is actually checked.
 #
-# Two notes on shape:
+# Two notes on shape, both learned from failing runs:
 #  * No `android-actions/setup-android`. GitHub's ubuntu runners already ship the SDK at
-#    /usr/local/lib/android/sdk, and v3 of that action fails trying to install the long-removed
-#    legacy `tools` package ("Warning: Failed to find package 'tools'"). We install exactly the
-#    packages we need with sdkmanager instead.
+#    /usr/local/lib/android/sdk, and v3 of that action fails installing the long-removed legacy
+#    `tools` package. We install exactly what we need instead — and resolve `sdkmanager` by
+#    search, because it is not on PATH and lives in a *versioned* cmdline-tools directory.
 #  * One emulator boot, not two. Booting costs minutes, and a second `android-emulator-runner`
 #    step would start from a clean device and lose the user profile the first one created.
 name: emulator
@@ -26,8 +26,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Gradle needs a lot of heap for AGP 9 + Compose on a 2-vCPU runner, and the daemon must stay
-  # off so the job does not outlive its step.
+  # Tuned for a 2-vCPU runner: no daemon (the job must not outlive its step), no parallelism,
+  # and enough heap for AGP 9 plus the Compose compiler.
   GRADLE_OPTS: >-
     -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g
     -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false
@@ -49,12 +49,21 @@ jobs:
 
       - name: Install the SDK packages this project needs
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           echo "ANDROID_HOME=$ANDROID_HOME"
-          sdkmanager --list_installed || true
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
-          sdkmanager --list_installed
+          # sdkmanager is not on PATH, and cmdline-tools is versioned (…/cmdline-tools/16.0/bin).
+          # Resolve it rather than hardcoding a version the runner image will eventually change.
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null | sort -V | tail -1)
+          test -n "$SDKMANAGER" || { echo "sdkmanager not found under $ANDROID_HOME"; exit 1; }
+          echo "using $SDKMANAGER"
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
+
+          "$SDKMANAGER" --list_installed || true
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          "$SDKMANAGER" --list_installed
 
       # The wrapper's distributionUrl points at a GitHub mirror because the reference build
       # sandbox blocks services.gradle.org. That mirror is reachable from here too.
@@ -72,9 +81,9 @@ jobs:
           APK=$(find app/build/outputs/proxy-test -name '*.apk' | head -1)
           test -n "$APK" || { echo "no generated APK; did ProxyApkFactoryTest skip itself?"; exit 1; }
           echo "Verifying $APK"
-          "$ANDROID_HOME"/build-tools/37.0.0/apksigner verify --verbose --print-certs "$APK"
-          "$ANDROID_HOME"/build-tools/37.0.0/aapt2 dump badging "$APK" | grep '^package:'
-          "$ANDROID_HOME"/build-tools/37.0.0/zipalign -c -p 4 "$APK" && echo "ALIGNMENT OK"
+          apksigner verify --verbose --print-certs "$APK"
+          aapt2 dump badging "$APK" | grep '^package:'
+          zipalign -c -p 4 "$APK" && echo "ALIGNMENT OK"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -110,9 +119,14 @@ jobs:
 
       - name: Install the SDK packages this project needs
         run: |
-          set -euxo pipefail
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null | sort -V | tail -1)
+          test -n "$SDKMANAGER" || { echo "sdkmanager not found under $ANDROID_HOME"; exit 1; }
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
 
       # GitHub-hosted Linux runners expose /dev/kvm, but the udev rules leave it root-only.
       # Without this the emulator falls back to software emulation and times out.
@@ -139,7 +153,7 @@ jobs:
           test -n "$APK"
           cp "$APK" /tmp/proxy.apk
           ls -l /tmp/proxy.apk
-          "$ANDROID_HOME"/build-tools/37.0.0/aapt2 dump badging /tmp/proxy.apk | grep '^package:'
+          aapt2 dump badging /tmp/proxy.apk | grep '^package:'
 
       # Creating a user and installing packages both need uid 2000, so the orchestration lives in
       # a shell script rather than in the test — an app cannot do either, even instrumented.
@@ -162,5 +176,6 @@ jobs:
           path: |
             app/build/outputs/androidTest-results/
             app/build/reports/androidTests/
+            premise-logs/
           if-no-files-found: warn
           retention-days: 14
