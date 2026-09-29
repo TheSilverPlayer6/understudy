@@ -56,14 +56,18 @@ class BridgeIntegrationTest {
         // application's resolver, so no separate addProvider call is needed.
         Robolectric.buildContentProvider(ProxyFileBridge::class.java).create(authority)
 
-        // ProxyFileBridge derives its roots from getExternalFilesDir(null)/../../, so creating
-        // that directory establishes a realistic Android/data/<pkg> tree.
+        // Derive the roots THE SAME WAY the provider does, rather than by counting levels from
+        // getExternalFilesDir(null). Counting is exactly what the provider used to do, and it
+        // was wrong: Robolectric's emulated external storage has no per-package segment
+        // (<tmp>/external-files/Android/data/files), so two levels up is Android/, not the
+        // package's own directory. A fixture that derives its paths independently of the code
+        // under test cannot catch that class of bug — it just disagrees with it.
         val filesDir = context.getExternalFilesDir(null)
         assertNotNull(filesDir, "external files dir unavailable")
-        dataRoot = filesDir.parentFile!!.parentFile!!
-        obbRoot = File(dataRoot.parentFile, "obb/${context.packageName}")
-        assertTrue(dataRoot.isDirectory, "expected $dataRoot to be a directory")
-        obbRoot.mkdirs()
+        dataRoot = File(filesDir.parentFile!!, context.packageName)
+        obbRoot = File(File(filesDir.parentFile!!.parentFile!!, "obb"), context.packageName)
+        assertTrue(dataRoot.mkdirs() || dataRoot.isDirectory, "could not create $dataRoot")
+        assertTrue(obbRoot.mkdirs() || obbRoot.isDirectory, "could not create $obbRoot")
 
         client = BridgeClient(context.contentResolver, authority)
     }
@@ -421,6 +425,54 @@ class BridgeIntegrationTest {
         assertTrue(client.hideLauncher(), "hideLauncher should succeed for our own component")
         assertTrue(client.showLauncher(), "showLauncher should succeed for our own component")
     }
+    /**
+     * The roots must end in the package name.
+     *
+     * This is the regression test for the bug that cost six CI runs. `rootDir("data")` was
+     * derived as `getExternalFilesDir(null).parentFile.parentFile`, which assumes the platform
+     * returns `.../Android/data/<pkg>/files`. On API 34/35 it returns `.../Android/data/<pkg>`,
+     * so two levels up landed on `.../Android/data` — the shared parent of every package's
+     * private storage, and precisely the directory the platform hides from all apps.
+     *
+     * The failure was maximally misleading: listing returned AccessDeniedException, which read
+     * as "the FUSE premise is false", when in fact the restriction was working correctly on a
+     * path we should never have pointed at. Meanwhile obb kept working, because its path was
+     * constructed with the package segment intact — an asymmetry that made it look like a
+     * platform difference between data and obb rather than a bug in one of the two expressions.
+     *
+     * Asserting on the *shape* of the path, not just that a listing succeeds, is what makes this
+     * catchable without an emulator.
+     */
+    @Test
+    fun rootsAreNeverTheSharedAndroidDataParent() {
+        val info = client.ping(context.packageName)
+
+        for (status in info.roots) {
+            val path = status.absolutePath
+            assertNotNull(path, "${status.root} reported no path")
+            val resolved = path!!.trimEnd('/')
+            // The bug this pins: the data root resolving to .../Android/data, the shared parent
+            // of every package's private storage, instead of the package's own directory. On a
+            // device that path is unreadable by design, so the bridge reported "permission
+            // denied" and it looked like the FUSE premise had failed.
+            assertFalse(
+                resolved.endsWith("/Android/data") || resolved.endsWith("/Android/obb"),
+                "${status.root} root is the SHARED parent ($resolved) — the bridge is pointed " +
+                    "one level too high, which on a device is a directory scoped storage hides",
+            )
+            // Whatever the platform's layout, the resolved root must sit under the right
+            // Android/<root> directory and must not be that directory itself.
+            assertTrue(
+                resolved.contains("/Android/"),
+                "${status.root} root should live under an Android/ directory: $resolved",
+            )
+        }
+
+        // And both roots must be usable, which is the operation that actually failed.
+        assertNotNull(client.list(StorageRoot.DATA), "listing our own data root must not throw")
+        assertNotNull(client.list(StorageRoot.OBB), "listing our own obb root must not throw")
+    }
+
     /**
      * The contract is duplicated on purpose — `:proxy-core` must stay dependency-free, so it
      * cannot share a module with `:app`. That duplication is exactly the kind of thing that

@@ -54,13 +54,80 @@ class ProxyFileBridge : ContentProvider() {
         if (ctx == null || pkg == null) {
             emptyMap()
         } else {
-            val external = ctx.getExternalFilesDir(null)
-            val dataDir = external?.parentFile?.parentFile
-                ?: File(File(android.os.Environment.getExternalStorageDirectory(), "Android/data"), pkg)
-            val obbDir = dataDir.parentFile?.let { File(File(it, "obb"), pkg) }
-                ?: File(File(android.os.Environment.getExternalStorageDirectory(), "Android/obb"), pkg)
-            mapOf(BridgeContract.ROOT_DATA to dataDir, BridgeContract.ROOT_OBB to obbDir)
+            mapOf(
+                BridgeContract.ROOT_DATA to dataDirFor(ctx, pkg),
+                BridgeContract.ROOT_OBB to obbDirFor(ctx, pkg),
+            )
         }
+    }
+
+    /**
+     * `Android/data/<pkg>` — the proxy's own private storage, which is the entire reason it
+     * exists.
+     *
+     * This used to be `getExternalFilesDir(null).parentFile.parentFile`, which assumes the
+     * platform returns `.../Android/data/<pkg>/files`. On API 34 and 35 emulators it returns
+     * `.../Android/data/<pkg>` with no `files` segment, so two levels up landed on
+     * `.../Android/data` — the SHARED parent of every package's private directory, and exactly
+     * the path the platform hides from all apps.
+     *
+     * That one wrong level produced every symptom this project chased through six CI runs, and
+     * it produced them asymmetrically, which is why it survived so long:
+     *  - listing the data root gave `AccessDeniedException`, because `Android/data` is what
+     *    scoped storage hides. The restriction was working correctly, on a directory the bridge
+     *    should never have been pointed at;
+     *  - `planted/save.dat` gave ENOENT, resolved as `Android/data/planted`;
+     *  - obb worked, because its path was built with the package segment intact.
+     *
+     * So the package segment is now located explicitly rather than reached by counting levels,
+     * and both platform shapes resolve to the same directory.
+     *
+     * The rule that generalises: **a root that is one level wrong is worse than a root that is
+     * missing.** A missing root fails loudly; a wrong one points at a directory the platform
+     * guarantees is unreadable, so the failure reads as "the premise is false" instead of "the
+     * path is wrong" — and invites six runs of FUSE archaeology.
+     */
+    private fun dataDirFor(ctx: android.content.Context, pkg: String): File {
+        val external = ctx.getExternalFilesDir(null)
+        if (external != null) {
+            val path = external.absolutePath
+            // A device gives either .../Android/data/<pkg> or .../Android/data/<pkg>/files
+            // depending on platform version, so find the package segment rather than counting
+            // levels. Truncating there is what makes both shapes resolve identically.
+            val marker = "/Android/data/$pkg"
+            val idx = path.indexOf(marker)
+            if (idx >= 0) {
+                return File(path.substring(0, idx + marker.length))
+            }
+            // No package segment in the path at all. That is what Robolectric's emulated
+            // external storage looks like (<tmp>/external-files/Android/data/files), and it is
+            // also the shape a misconfigured volume could produce. Trust the platform's own
+            // directory rather than substituting Environment's: substituting silently points
+            // the bridge at a DIFFERENT tree from the one getExternalFilesDir created, which
+            // is how the original bug hid for six CI runs. Only fall through to Environment
+            // when getExternalFilesDir is unavailable entirely.
+            val parent = external.parentFile
+            if (parent != null) return parent
+        }
+        return File(File(android.os.Environment.getExternalStorageDirectory(), "Android/data"), pkg)
+    }
+
+    /**
+     * `Android/obb/<pkg>`, the sibling of [dataDirFor].
+     *
+     * Built from the resolved data root's parent so the two always sit under the same
+     * `Android/` directory — on a device that is the real volume, under Robolectric it is the
+     * emulated tree the tests create. Deriving obb independently of data is what let the two
+     * disagree in the first place.
+     */
+    private fun obbDirFor(ctx: android.content.Context, pkg: String): File {
+        val data = dataDirFor(ctx, pkg)
+        // Two levels up from Android/data/<pkg> is Android/, whose obb/<pkg> child is the
+        // sibling root. Going via the resolved data root keeps the two under the same Android/
+        // directory on every layout, which deriving them independently did not.
+        val androidDir = data.parentFile?.parentFile
+            ?: File(android.os.Environment.getExternalStorageDirectory(), "Android")
+        return File(File(androidDir, "obb"), pkg)
     }
 
     private fun rootDir(root: String): File? = roots[root]

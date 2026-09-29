@@ -103,9 +103,13 @@ class SessionManagerTest {
         // silently look at different trees.
         val filesDir = app.getExternalFilesDir(null)
         assertNotNull(filesDir, "external files dir unavailable")
-        dataRoot = filesDir.parentFile!!.parentFile!!
-        assertTrue(dataRoot.isDirectory, "expected $dataRoot to be the provider's data root")
-        obbRoot = File(dataRoot.parentFile, "obb/$pkg")
+        // Derived the way ProxyFileBridge derives them, not by counting levels from
+        // getExternalFilesDir: Robolectric's emulated external storage has no per-package
+        // segment, so counting lands on Android/ instead of the package's own directory, and a
+        // fixture that disagrees with the code under test cannot verify anything about it.
+        dataRoot = File(filesDir.parentFile!!, pkg)
+        obbRoot = File(File(filesDir.parentFile!!.parentFile!!, "obb"), pkg)
+        assertTrue(dataRoot.mkdirs() || dataRoot.isDirectory, "could not create $dataRoot")
         assertTrue(obbRoot.mkdirs() || obbRoot.isDirectory, "could not create $obbRoot")
     }
 
