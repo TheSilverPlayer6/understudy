@@ -229,12 +229,21 @@ the directories afterwards.
   assembly deliberately produces `app-release-unsigned.apk` rather than falling back to the
   committed test identity, which is public and must never sign a distributed build.
 
-  Note what this does **not** solve: the bridge is guarded by a `signature`-level permission, so
-  the app and the proxy it generates must share a signer. In CI they do, because both are signed
-  with the committed test keystore. In production the proxy is signed with a per-install
-  `SigningIdentity` key, which cannot match a build-time release key. Shipping a signed release
-  therefore needs a caller-identity check the proxy can evaluate against the *generator's*
-  certificate rather than its own; until then the release build is unsigned on purpose.
+  The design problem this used to imply is solved. A `signature`-level permission requires caller
+  and provider to share a certificate, which is impossible in production: the proxy is signed with
+  a per-install key generated on the device, the app with its build-time key. So the generator now
+  bakes its own certificate's SHA-256 into the proxy as
+  `assets/understudy-generator-cert.sha256`, and `ProxyFileBridge.enforceCaller()` checks every
+  `query`/`openFile`/`call` against it. The permission is kept as a second layer — it costs
+  nothing and covers the CI/debug configuration, where both APKs genuinely do share the committed
+  test key. With no digest asset the proxy falls back to permission-only enforcement, which is
+  what the test suite and CI rely on, and that fallback is an explicit test rather than an
+  accident.
+
+  What remains unverified about this is the production shape end to end: CI signs both APKs with
+  the test keystore, so it exercises the *permission* path, not the digest path. The digest path
+  is unit-tested (asset present at the right path, covered by the v1 signature, malformed digests
+  rejected) but has not run on a device against a differently-signed app.
 * The only `ShellBackend` is the manual one. A self-pairing wireless-ADB backend is the intended
   upgrade; it is not stubbed in, because a backend that reports itself available and then cannot
   execute is worse than no backend.
@@ -252,12 +261,29 @@ the directories afterwards.
 
 * The signing key is generated per install and stored in app-private storage as PKCS#8. It is a
   software key rather than an Android Keystore key because our own v1/v2 signer needs the private
-  material, and Keystore keys are non-exportable by design. It only ever signs throwaway proxies
-  whose sole privilege is a `signature`-level permission back into Understudy.
-* The bridge provider is exported but guarded by `dev.understudy.permission.BRIDGE` at
-  `protectionLevel="signature"`. Both sides validate paths independently — NUL bytes, absolute
-  paths, `..`, backslashes, empty segments — and the proxy re-checks via canonical paths so a
-  symlink planted inside the tree cannot redirect it.
+  material, and Keystore keys are non-exportable by design. It only ever signs throwaway proxies,
+  whose sole privilege is to re-export their own app-specific storage back to the one install that
+  generated them. `dataExtractionRules` excludes every backup domain on Android 12+ and
+  `allowBackup="false"` covers earlier versions, because a restored key would let another device's
+  proxies be accepted as this one's — and restoring one *over* an existing identity would
+  silently break every proxy already installed here.
+* The bridge provider is exported and guarded twice over: by
+  `dev.understudy.permission.BRIDGE` at `protectionLevel="signature"`, and by
+  `ProxyFileBridge.enforceCaller()`, which checks the calling uid's signing certificate against
+  the SHA-256 digest of the *generator's* certificate that was baked into the APK at generation
+  time. The second layer is what makes production work at all — a signature-level permission
+  needs caller and provider to share a certificate, which they cannot when the proxy is signed
+  with a per-install device key and the app with a build-time key. Verdicts are cached per uid,
+  `SYSTEM_UID` and the proxy's own uid are trusted, a malformed digest fails closed, and an
+  absent one falls back to permission-only (the CI/debug configuration). Both sides validate
+  paths independently — NUL bytes, absolute paths, `..`, backslashes, empty segments — and the
+  proxy re-checks via canonical paths so a symlink planted inside the tree cannot redirect it.
+
+  Note the threat model this does and does not cover. The digest proves the caller is the install
+  that generated this proxy; it does not survive the generator being replaced by a
+  differently-signed build, which invalidates every proxy it made. That is intentional — those
+  proxies must stop trusting the new app — but it means a re-signed or sideloaded update to
+  Understudy requires regenerating and reinstalling its proxies.
 * `QUERY_ALL_PACKAGES` is not requested. Proxy detection is done by calling the provider, which is
   stronger evidence than a package query and needs no permission.
 * **Teardown refuses to destroy data without an explicit `confirmDataLoss = true`**, and
