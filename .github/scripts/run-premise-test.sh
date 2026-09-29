@@ -376,9 +376,20 @@ fi
 set -e
 
 log "diagnostic output from inside the app's own mount namespace"
-# These lines are the only evidence about what the app uid actually sees, as opposed to what
-# root sees. Printed whether or not the suite passed.
-grep -E "^DIAG |DIAG " premise-logs/instrument.log | head -60 || echo "(no DIAG lines found)"
+# The test app's view. Note this is evidence about the RESTRICTION, not about the mechanism:
+# the test app is a different uid from the proxy, so Android/data/<target> is supposed to be
+# invisible to it. Printed whether or not the suite passed.
+grep -hE "DIAG " premise-logs/instrument.log premise-logs/logcat.log 2>/dev/null \
+  | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -40 || echo "(no DIAG lines found)"
+
+log "the PROXY's own report of its two roots (the evidence that matters)"
+# Only the proxy can say whether it can read its own Android/data. This is the answer to the
+# question runs #10-#15 kept circling: it reports both java.io.File and java.nio.file views, so
+# AccessDeniedException and NoSuchFileException are distinguishable, and it creates a scratch
+# directory to separate "the mount is broken" from "this entry pre-dates the process".
+grep -hE "SELF-DIAG" premise-logs/instrument.log premise-logs/logcat.log 2>/dev/null \
+  | sed -E 's/.*System\.out\( *[0-9]+\): //; s/.*UnderstudyBridge\( *[0-9]+\): //' \
+  | head -60 || echo "(no SELF-DIAG lines found)"
 
 # `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
 if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then

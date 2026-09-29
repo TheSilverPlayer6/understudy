@@ -191,6 +191,37 @@ class BridgePremiseTest {
         }
     }
 
+    /**
+     * Asks the PROXY what it sees, rather than looking from out here.
+     *
+     * This is the diagnostic that actually settles the question. Everything printed by
+     * [diagnoseDataRootVisibility] describes the view of uid [Process.myUid] — the *test app* —
+     * for which `Android/data/<target>` is supposed to be invisible. Run #15 showed exactly that:
+     * NoSuchFileException for the data root, and AccessDeniedException for obb, from the test
+     * app. Both are the restriction working, and neither says anything about whether the proxy
+     * can reach its own files.
+     *
+     * The proxy's report goes to the instrument log AND to logcat under the UnderstudyBridge
+     * tag, because the CI grep only captures one of them reliably.
+     */
+    @Test
+    fun proxyReportsWhatItSeesOfItsOwnRoots() {
+        val report = client().selfDiagnostic()
+        if (report == null) {
+            // An older template without the call. Not a premise failure, but it must be loud:
+            // without this report there is no evidence about the proxy's own view at all.
+            println("SELF-DIAG unavailable: the installed proxy does not implement selfDiagnostic")
+            return
+        }
+        println("SELF-DIAG-BEGIN")
+        report.lineSequence().forEach { println("SELF-DIAG $it") }
+        println("SELF-DIAG-END")
+
+        // The report is the evidence; asserting on its contents would make the diagnostic
+        // itself the thing under test. One structural check only: it must describe both roots.
+        assertTrue("data" in report && "obb" in report, "report should cover both roots: $report")
+    }
+
     @Test
     fun plantedSaveDataIsReadableThroughTheBridge() {
         assumeTrue("CI did not plant fixtures", expectPlanted)

@@ -209,6 +209,21 @@ class BridgeClient(
         call(BridgeContract.CALL_HIDE_LAUNCHER).getBoolean(BridgeContract.KEY_OK, false)
     }.getOrDefault(false)
 
+    /**
+     * Asks the proxy to describe what IT sees of its own two roots.
+     *
+     * The app cannot answer this for itself: it runs as a different uid, for which the target's
+     * `Android/data` is meant to be invisible, so anything the app observes about that tree is
+     * evidence about the restriction rather than about the mechanism. This call is how the
+     * premise test — and a support request from a real device — gets the proxy's own view,
+     * including the AccessDenied-versus-NoSuchFile distinction that `java.io.File` discards.
+     *
+     * @return the report, or null if the proxy does not implement it (an older template)
+     */
+    fun selfDiagnostic(): String? = runCatching {
+        call(BridgeContract.CALL_SELF_DIAGNOSTIC).getString(BridgeContract.KEY_DIAGNOSTIC)
+    }.getOrNull()
+
     fun showLauncher(): Boolean = runCatching {
         call(BridgeContract.CALL_SHOW_LAUNCHER).getBoolean(BridgeContract.KEY_OK, false)
     }.getOrDefault(false)

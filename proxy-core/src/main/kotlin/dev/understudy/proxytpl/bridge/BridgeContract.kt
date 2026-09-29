@@ -62,6 +62,15 @@ object BridgeContract {
     /** Re-enables the proxy's launcher activity. */
     const val CALL_SHOW_LAUNCHER: String = "showLauncher"
 
+    /**
+     * Returns a text report of what the proxy sees of its OWN two roots.
+     *
+     * Only the proxy can answer that question: the app runs as a different uid, for which
+     * `Android/data/<target>` is *supposed* to be invisible, so the app's view is evidence
+     * about the restriction and never about the mechanism. See `ProxyFileBridge.selfDiagnostic`.
+     */
+    const val CALL_SELF_DIAGNOSTIC: String = "selfDiagnostic"
+
     // ---- arguments ---------------------------------------------------------
 
     const val ARG_PATH: String = "path"
@@ -79,6 +88,7 @@ object BridgeContract {
     const val KEY_PACKAGE: String = "package"
     const val KEY_USER: String = "user"
     const val KEY_ERROR: String = "error"
+    const val KEY_DIAGNOSTIC: String = "diagnostic"
     const val KEY_ROOTS: String = "roots"
     const val KEY_ENTRIES: String = "entryCount"
     const val KEY_BYTES: String = "bytes"

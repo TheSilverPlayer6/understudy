@@ -421,4 +421,60 @@ class BridgeIntegrationTest {
         assertTrue(client.hideLauncher(), "hideLauncher should succeed for our own component")
         assertTrue(client.showLauncher(), "showLauncher should succeed for our own component")
     }
+    /**
+     * The contract is duplicated on purpose — `:proxy-core` must stay dependency-free, so it
+     * cannot share a module with `:app`. That duplication is exactly the kind of thing that
+     * drifts silently: a renamed method string on one side turns every call into "unknown
+     * method" at runtime, and nothing else catches it, because Robolectric registers providers
+     * by class reference and never resolves a name through PackageManager.
+     *
+     * So this compares every `String` constant on both sides by reflection rather than a
+     * hand-maintained list. A hand-written list would pass while an unlisted constant drifted,
+     * which is the failure mode the test exists to prevent.
+     */
+    @Test
+    fun theTwoCopiesOfTheContractAgree() {
+        val ours = dev.understudy.bridge.BridgeContract::class.java
+        val theirs = dev.understudy.proxytpl.bridge.BridgeContract::class.java
+
+        // Only the constants that cross the process boundary. Two exclusions, both learned
+        // by running it:
+        //  * `$stable` and friends are synthesised by the Compose compiler into :app's copy
+        //    and have no counterpart in :proxy-core, which has no Compose. Comparing them
+        //    reports drift that does not exist.
+        //  * non-String, non-int fields (the ROOTS list, say) are compared explicitly below,
+        //    where a rename on both sides is still caught.
+        fun constants(c: Class<*>): Map<String, Any?> = c.declaredFields
+            .filter { f -> !f.isSynthetic && !f.name.startsWith("\$") }
+            .filter { f ->
+                java.lang.reflect.Modifier.isStatic(f.modifiers) &&
+                    (f.type == String::class.java || f.type == Int::class.javaPrimitiveType)
+            }
+            .associate { f -> f.name to f.get(null) }
+
+        val a = constants(ours)
+        val b = constants(theirs)
+
+        // Every constant :app declares must exist on the proxy's copy with the same value.
+        // The proxy may legitimately declare more (it is the implementing side).
+        val mismatched = a.filter { (name, value) -> !b.containsKey(name) || b[name] != value }
+        assertTrue(
+            mismatched.isEmpty(),
+            "contract drift between :app and :proxy-core — the bridge would fail at runtime " +
+                "with 'unknown method' or a missing bundle key: $mismatched",
+        )
+
+        // Pin the load-bearing ones explicitly too, so a rename on BOTH sides (which the
+        // comparison above cannot see) still fails here.
+        assertEquals("ping", dev.understudy.bridge.BridgeContract.CALL_PING)
+        assertEquals("selfDiagnostic", dev.understudy.bridge.BridgeContract.CALL_SELF_DIAGNOSTIC)
+        assertEquals(
+            dev.understudy.proxytpl.bridge.BridgeContract.PROTOCOL_VERSION,
+            dev.understudy.bridge.BridgeContract.PROTOCOL_VERSION,
+        )
+        assertEquals(
+            dev.understudy.proxytpl.bridge.BridgeContract.ROOTS,
+            dev.understudy.bridge.BridgeContract.ROOTS,
+        )
+    }
 }

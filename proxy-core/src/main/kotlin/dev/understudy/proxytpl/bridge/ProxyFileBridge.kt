@@ -177,6 +177,7 @@ class ProxyFileBridge : ContentProvider() {
                 BridgeContract.CALL_RENAME -> rename(extras, out)
                 BridgeContract.CALL_STAT_TREE -> statTree(extras, out)
                 BridgeContract.CALL_WIPE_SELF -> wipeSelf(extras, out)
+                BridgeContract.CALL_SELF_DIAGNOSTIC -> selfDiagnostic(out)
                 BridgeContract.CALL_HIDE_LAUNCHER -> setLauncherEnabled(false, out)
                 BridgeContract.CALL_SHOW_LAUNCHER -> setLauncherEnabled(true, out)
                 else -> {
@@ -319,6 +320,119 @@ class ProxyFileBridge : ContentProvider() {
         }
         out.putBoolean(BridgeContract.KEY_OK, failures == 0)
         if (failures > 0) out.putString(BridgeContract.KEY_ERROR, "$failures entries could not be removed")
+    }
+
+    /**
+     * Reports what THIS process sees of its own two roots, with the errno distinction that
+     * `java.io.File` throws away.
+     *
+     * This exists because the premise test could not answer the question it needed to. The
+     * test app runs as a different uid from the proxy, so its view of
+     * `/storage/emulated/<user>/Android/data/<target>` is *supposed* to be "hidden" — that is
+     * the restriction the whole project works around. Only the proxy's own view is evidence
+     * about whether the mechanism works, and only the proxy can report it.
+     *
+     * `File.listFiles()` returns null for both EACCES and ENOENT, which is why three CI runs
+     * could not tell "refused" from "not there". `java.nio.file` distinguishes them:
+     * AccessDeniedException versus NoSuchFileException. Those two have opposite fixes, so the
+     * distinction is the whole point.
+     *
+     * Also creates and immediately removes a scratch directory, because "can this process make
+     * a NEW entry in its own data root and list it" is the control that separates a broken
+     * mount from a directory that merely pre-dates the process.
+     *
+     * Deliberately read-only apart from that scratch dir, and it never exposes another
+     * package's data: every path it touches is under this package's own two roots.
+     */
+    private fun selfDiagnostic(out: Bundle) {
+        val sb = StringBuilder()
+        val uid = android.os.Process.myUid()
+        sb.append("uid=").append(uid)
+            .append(" user=").append(uid / 100000)
+            .append(" pkg=").append(context?.packageName).append('\n')
+
+        for (name in BridgeContract.ROOTS) {
+            val root = rootDir(name)
+            if (root == null) {
+                sb.append(name).append(": root unresolved\n")
+                continue
+            }
+            sb.append(name).append(" path=").append(root.absolutePath)
+                .append(" exists=").append(root.exists())
+                .append(" isDir=").append(root.isDirectory)
+                .append(" canRead=").append(root.canRead())
+                .append(" canExec=").append(root.canExecute()).append('\n')
+
+            // The errno distinction File.list() cannot make.
+            val nio = runCatching {
+                java.nio.file.Files.newDirectoryStream(root.toPath()).use { stream ->
+                    val names = ArrayList<String>()
+                    for (p in stream) names.add(p.fileName.toString())
+                    names
+                }
+            }
+            sb.append("  nio-listdir -> ").append(
+                nio.fold(
+                    { it.toString() },
+                    { e -> e.javaClass.simpleName + ": " + e.message },
+                ),
+            ).append('\n')
+
+            val io = runCatching { root.list()?.toList() }
+            sb.append("  File.list() -> ").append(
+                io.fold(
+                    { it?.toString() ?: "null" },
+                    { e -> e.javaClass.simpleName + ": " + e.message },
+                ),
+            ).append('\n')
+        }
+
+        // Control: a directory this process creates itself, right now. If this lists and a
+        // pre-existing sibling does not, the difference is about how the entry came to exist,
+        // not about the mount being broken.
+        val dataRoot = rootDir(BridgeContract.ROOT_DATA)
+        if (dataRoot != null) {
+            val scratch = File(dataRoot, "understudy-selftest")
+            val created = scratch.isDirectory || scratch.mkdirs()
+            sb.append("scratch mkdirs=").append(created).append('\n')
+            if (created) {
+                runCatching { File(scratch, "probe.txt").writeText("selftest") }
+                val viaNio = runCatching {
+                    java.nio.file.Files.newDirectoryStream(dataRoot.toPath()).use { s ->
+                        val n = ArrayList<String>()
+                        for (p in s) n.add(p.fileName.toString())
+                        n
+                    }
+                }
+                sb.append("  data root after scratch -> ").append(
+                    viaNio.fold({ it.toString() }, { e -> e.javaClass.simpleName }),
+                ).append('\n')
+                val scratchList = runCatching {
+                    java.nio.file.Files.newDirectoryStream(scratch.toPath()).use { s ->
+                        val n = ArrayList<String>()
+                        for (p in s) n.add(p.fileName.toString())
+                        n
+                    }
+                }
+                sb.append("  scratch listing -> ").append(
+                    scratchList.fold({ it.toString() }, { e -> e.javaClass.simpleName }),
+                ).append('\n')
+                // Clean up: a diagnostic must not leave state behind that a later run mistakes
+                // for the user's data.
+                runCatching { File(scratch, "probe.txt").delete() }
+                runCatching { scratch.delete() }
+            }
+        }
+
+        // What the platform thinks the mount situation is, for the record.
+        sb.append("getExternalFilesDir=").append(context?.getExternalFilesDir(null)).append('\n')
+        sb.append("externalStorageState=")
+            .append(android.os.Environment.getExternalStorageState()).append('\n')
+
+        val report = sb.toString()
+        Log.i(TAG, "self-diagnostic:\n$report")
+        out.putBoolean(BridgeContract.KEY_OK, true)
+        out.putString(BridgeContract.KEY_DIAGNOSTIC, report)
     }
 
     private fun setLauncherEnabled(enabled: Boolean, out: Bundle) {
