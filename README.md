@@ -159,16 +159,42 @@ No `apksigner`, no `zipalign`, no BouncyCastle at runtime.
 
 ## Testing
 
-65 JVM tests, all passing:
+106 JVM tests, all passing, plus an instrumented suite that runs on a real Android emulator in
+CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE
+layer and no JVM test can reach it.
+
 
 | Suite | Covers |
 |---|---|
-| `ManifestPatcherTest` (9) | Parses the **real AGP-produced manifest** committed as a fixture. Asserts a no-op re-encode is byte-identical, that all three identity sites move, that the permission does not, that the chunk chain still lands exactly on EOF, and that invalid package names are rejected. |
+| `BridgeIntegrationTest` (30) | **Robolectric.** Registers the *real* `ProxyFileBridge` from `:proxy-core` and drives it with the *real* `BridgeClient` through a real `ContentResolver`: identity handshake, cursor schema, streaming both ways, truncate vs append, mkdirs/delete/rename/statTree/statPath, wipe, launcher hiding, and path-safety from both sides — including a hand-crafted traversal URI that bypasses the client. Also asserts both roots end in the package name (see below), and that the two copies of `BridgeContract` agree on every constant that crosses the process boundary. |
+| `SessionManagerTest` (34) | **Robolectric.** The transition guards the app's safety rests on, against the real `ProxyFileBridge`, real `ProxyInstaller` (on Robolectric's `PackageInstaller` shadow) and real `ApkGenerator`. Mostly about *refusals*: `DESTROY_DATA` without confirmation never even asks the system to uninstall; a failed wipe or shell command sets `dataAtRisk` instead of proceeding; a recorded pull for one package does not unlock evacuation of another; a dead bridge is not treated as a successful wipe. |
+| `ShellCommandsTest` (12) | The runbook's **ordering** — data moved aside before anything can delete it — plus per-user paths, idempotence guards, quoting, that the destructive form carries no `-k`, and that ownership repair targets the *per-user* uid via `pm list packages -U` rather than dumpsys. |
+| `TransferModelTest` (11) | Progress arithmetic, clamping, empty-transfer edge cases, and the success predicate that must not report success on a partial copy. |
+| `ManifestPatcherTest` (10) | Parses the **real AGP-produced manifest** committed as a fixture. Asserts a no-op re-encode is byte-identical, that only the bare package string is rewritten, that the permission is preserved, that the chunk chain still lands exactly on EOF, and that invalid package names are rejected. |
 | `V2SignerStructureTest` (6) | Re-parses our own signer block with an independent reader mirroring apksig's field order; verifies the signature over exactly the embedded `signedData`; checks the signing-block framing and the `0xa5`/`0x5a` chunked-digest rules. |
 | `ProxyApkFactoryTest` (3) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, and that two targets differ only in identity. Writes a sample APK for external verification. |
-| `ShellCommandsTest` (10) | The runbook's **ordering** — data moved aside before anything can delete it — plus per-user paths, idempotence guards, quoting, and that the destructive form carries no `-k`. |
-| `TransferModelTest` (11) | Progress arithmetic, clamping, empty-transfer edge cases, and the success predicate that must not report success on a partial copy. |
-| `BridgeIntegrationTest` (26) | **Robolectric.** Registers the *real* `ProxyFileBridge` from `:proxy-core` and drives it with the *real* `BridgeClient` through a real `ContentResolver`: identity handshake, cursor schema, streaming both ways, truncate vs append, mkdirs/delete/rename/statTree, wipe, launcher hiding, and path-safety from both sides — including a hand-crafted traversal URI that bypasses the client. |
+
+On a real emulator (API 34 and 35, KVM, `target: default` so `adb root` works),
+`BridgePremiseTest` creates a secondary user, installs the runtime-generated proxy and this app
+into it, plants known bytes as root, and asserts the premise:
+
+* the proxy is reachable across the process boundary, so the `signature`-level BRIDGE permission
+  really is granted between two separately built APKs;
+* it runs in the intended profile;
+* bytes planted by root into `Android/data/<pkg>` and `Android/obb/<pkg>` are listed and streamed
+  back through the bridge;
+* a write through the bridge lands on the real filesystem, confirmed by the proxy's own
+  `statPath` — the caller cannot check for itself, since the platform hides that directory from
+  it, which is the point;
+* the platform still hides other packages' private storage, so none of the above can pass
+  vacuously;
+* traversal is rejected and a forged authority cannot read another package.
+
+`rootsAreNeverTheSharedAndroidDataParent` deserves a note. A root that resolves one level too
+high — `Android/data` instead of `Android/data/<pkg>` — is *worse* than a missing root: it points
+the bridge at the one directory scoped storage guarantees is unreadable, so the failure reads as
+"the premise is false" rather than "the path is wrong". That is exactly what happened, and it
+took six CI runs to find. Asserting the shape of the path catches it without an emulator.
 
 The generated APK is additionally verified with the platform's own tooling:
 
@@ -181,27 +207,43 @@ keytool -printcert                         →  parses our hand-built PKCS#7
 
 ### Not covered
 
-* **Nothing has run on a device or emulator**, so the FUSE grant itself — the premise the whole
-  app rests on — is untested. Robolectric has no FUSE layer, so `BridgeIntegrationTest` proves
-  the *protocol* is correct, not that the platform will *grant* the access.
-  Attempted and blocked: `/dev/kvm` exists in the build sandbox and the host CPU supports `svm`,
-  but the node is `nobody:nogroup` 660 and `sudo chmod` is denied (no `CAP_FOWNER`); `kvm=True`
-  returns `KVM sandboxes are not enabled for this organization`, and the API key cannot change
-  org features. GitHub Actions runners do expose `/dev/kvm`, but there are no git credentials
-  anywhere in the environment to push a workflow. See `research/04-milestone3-running-it.md`.
-* The installer UX, SAF writes, grant persistence, `hasFragileUserData` dialog behaviour, OEM
-  variations and recovery from process death mid-transfer are all unexercised.
-* `SessionManager`'s transition guards have no test yet — they are the next highest-value target
-  after device access.
+* **OEM behaviour.** Everything verified so far is AOSP `target: default` on API 34 and 35
+  emulators. MIUI/HyperOS, ColorOS and One UI each add installer guards, background-kill rules
+  and wireless-debugging timeouts of their own, and none of it has been exercised.
+* **The installer UX from inside the app.** CI installs with `adb install --user`; the
+  `PackageInstaller` session path, the `STATUS_PENDING_USER_ACTION` round trip and the per-profile
+  `REQUEST_INSTALL_PACKAGES` grant flow are still unexercised on a device.
+* **SAF writes** to a user-picked tree, and grant persistence across reboot.
+* **`hasFragileUserData`** actually producing the "Keep app data" checkbox on a current build.
+* **Recovery from process death** mid-transfer.
+
+The premise itself is no longer on this list. It is verified on a real Android system, in a
+secondary profile, on two API levels, in CI on every push: `OK (10 tests)` and
+`PREMISE VERIFIED on API 34` / `on API 35`, including that `pm uninstall -k` really does preserve
+the directories afterwards.
 
 ## Known gaps
 
-* `:app` has no release `signingConfigs`, so release assembly produces an unsigned APK.
+* `:app` release signing needs an operator keystore. `keystore.properties` at the repo root
+  (gitignored) supplies `storeFile`/`storePassword`/`keyAlias`/`keyPassword`; without it release
+  assembly deliberately produces `app-release-unsigned.apk` rather than falling back to the
+  committed test identity, which is public and must never sign a distributed build.
+
+  Note what this does **not** solve: the bridge is guarded by a `signature`-level permission, so
+  the app and the proxy it generates must share a signer. In CI they do, because both are signed
+  with the committed test keystore. In production the proxy is signed with a per-install
+  `SigningIdentity` key, which cannot match a build-time release key. Shipping a signed release
+  therefore needs a caller-identity check the proxy can evaluate against the *generator's*
+  certificate rather than its own; until then the release build is unsigned on purpose.
 * The only `ShellBackend` is the manual one. A self-pairing wireless-ADB backend is the intended
   upgrade; it is not stubbed in, because a backend that reports itself available and then cannot
   execute is worse than no backend.
-* `syncProxyTemplate` is manual. Nothing fails if you edit `:proxy` and forget to run it — the app
-  would ship a stale template. A hash-comparison task hooked into `check` is the obvious fix.
+* `syncProxyTemplate` is still manual, but no longer silent: `checkProxyTemplateFresh` (hooked
+  into `check`, so it runs in CI) compares the committed asset against a fresh `:proxy` build and
+  names the changed entry. It compares zip entry CRCs rather than file hashes because two builds
+  of unchanged sources are not byte-identical — apksigner embeds a PKCS#7 signingTime, measured
+  as 338 differing bytes, all inside the signature — so a hash check would fail on a clean
+  checkout and get ignored.
 * Proxy APK is ~680 KB, dominated by the Kotlin stdlib in `classes.dex`. `multiDexEnabled = false`
   would collapse it to one dex; writing the proxy in Java would shrink it to a few tens of KB but
   contradicts the project's Kotlin-only requirement.

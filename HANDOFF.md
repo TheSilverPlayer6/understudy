@@ -1,7 +1,8 @@
 # HANDOFF — read this first
 
-Last updated 2026-09-29 by the agent that built phases 1–3. Work stopped mid-task; section 4
-says exactly where.
+Last updated 2026-09-29. **Milestone 4 is complete: the premise is verified on real Android
+emulators and CI is green end to end.** Section 4 records what that took and what it turned up;
+section 3 is what remains.
 
 Companion documents, in reading order:
 
@@ -52,10 +53,11 @@ So there are two paths, and the app must tell the user which one they are on:
 ### Verified green
 
 ```
-gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease :app:testDebugUnitTest
+gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
+        :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  66 unit tests, 0 failures
-  app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~697 KB
+  106 unit tests, 0 failures
+  app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~698 KB
 
 apksigner verify --verbose --print-certs <generated proxy>
   → Verifies · v2 scheme: true · 1 signer · RSA-2048
@@ -63,9 +65,11 @@ aapt2 dump badging → package: name='com.example.targetgame'
 zipalign -c -p 4   → ALIGNMENT OK
 ```
 
-CI: `https://github.com/TheSilverPlayer6/understudy` — the `jvm` job passes fully (unit tests,
-all variants, apksigner/aapt2/zipalign over the generated APK). The `premise` job is the work in
-progress; see section 4.
+CI: `https://github.com/TheSilverPlayer6/understudy` — **all three jobs green** (run #18). The
+`jvm` job covers unit tests, every variant, `checkProxyTemplateFresh`, and
+apksigner/aapt2/zipalign over the generated APK. The two `premise` jobs boot KVM emulators on
+API 34 and API 35 and report `OK (10 tests)` plus `PREMISE VERIFIED`. Section 4 records what
+that took.
 
 ### Components
 
@@ -77,104 +81,148 @@ progress; see section 4.
 | `proxy-core` | **done** | The proxy's real code as an Android *library*, zero dependencies, so `:app` tests can drive it. |
 | `proxy` | **done** | Manifest + dependency on `:proxy-core`; builds the template APK. |
 | `bridge` | **done, Robolectric-verified** | `BridgeClient`, `BridgeError`, contract mirror. |
-| `install` | **built, not device-verified** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. |
-| `core` | **built, untested** | `SessionState`, `SessionManager`. No test coverage yet. |
-| `shell` | **done** | `ShellBackend` + `ShellCommands` runbook generator (10 tests). |
-| `transfer` | **built, model-tested** | Streamed, resumable, write-then-swap. |
-| `storage` | **built, not device-verified** | SAF destination with persisted grants. |
+| `install` | **device-verified via CI's adb path; the in-app `PackageInstaller` UX is not** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI installs with `adb install --user`, which proves the *artifacts* install; the session-based flow the app uses is still unexercised. |
+| `core` | **done, 34 tests** | `SessionState`, `SessionManager`. Guards the teardown paths — see `SessionManagerTest`. |
+| `shell` | **done, 12 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. |
+| `transfer` | **built, model-tested** | Streamed, resumable, write-then-swap. Both directions now have a UI. |
+| `storage` | **built, not device-verified** | SAF destination with persisted grants; `collectSourcesForPush` walks a user-chosen tree. |
 | `ui` | **built, never run** | Compose: Session / Files / Shell / About tabs. |
 
 ---
 
 ## 3. What remains
 
-In rough priority order:
+Items 1–5 of the previous list are done: the premise CI job is green, `SessionManager` has 34
+tests, release signing is wired (opt-in, see below), `checkProxyTemplateFresh` runs in `check`,
+and the push direction has a UI. In rough priority order, what is actually left:
 
-1. **Finish the premise CI job** (section 4). This is the only thing standing between the project
-   and a verified central claim.
-2. **`SessionManager` tests.** The transition guards are the safety-critical logic in the app —
-   teardown must never destroy data it has not accounted for — and they have zero coverage.
-3. **`:app` release signing.** Release output is currently unsigned. Decide between a committed
-   keystore and first-run generation; first-run matches how `SigningIdentity` already works.
-4. **`checkProxyTemplateFresh`.** A `check`-hooked task comparing the committed
-   `app/src/main/assets/proxy-template.apk` against a freshly built `:proxy` APK. Today
-   `./gradlew :app:syncProxyTemplate` is manual and nothing fails if you forget it — the app
-   would silently ship a stale template. (It must stay a standalone task: writing into `src/`
-   conflicts with `lintVital*` in the same task graph.)
-5. **Push direction in the UI.** `TransferEngine.push` and `PushSource` exist and are model-tested;
-   no screen drives them.
-6. **Wireless-ADB `ShellBackend`.** Only the manual command-generating backend ships, by choice:
-   a backend that claims to be available and then cannot execute is worse than none.
-7. **OEM testing** — MIUI/HyperOS, ColorOS, One UI.
-
----
-
-## 4. Exactly where work stopped
-
-### The last CI run (#10) got further than any before it
-
-On API 34/35 emulators with KVM, the run achieved:
-
-* `adb root` succeeded (needed `target: default` / AOSP; `google_apis` is production-signed)
-* secondary user 10 created and started
-* the **runtime-generated proxy APK installed into user 10**
-* `:app` and the test APK installed into user 10
-* fixtures planted into `/data/media/10/Android/{data,obb}/com.example.targetgame`
-* the proxy process **started and answered** — `ping()` passed, so the `signature`-level
-  `BRIDGE` permission was genuinely granted across the two APKs
-* `thePlatformStillHidesOtherPackagesPrivateStorageFromUs` **passed** — confirming on a real
-  device that the restriction Understudy works around is real, so the suite cannot pass vacuously
-
-Three tests still failed, all with the same root cause:
-
-```
-cannot list: content://com.example.targetgame/data (permission denied)
-no such entry: content://com.example.targetgame/data/planted
-```
-
-### Root cause found, fix written but NOT yet verified
-
-`File.listFiles()` returned null inside the proxy. The planted directories were
-`drwxrws--- root ext_data_rw` — created by `adb shell` running as **root**.
-
-**The FUSE layer attributes app-specific external storage by owning uid, not merely by path.**
-So a root-owned `Android/data/<pkg>` is denied even to the package that owns it, and it presents
-as an empty directory. The platform creates these directories as the app's uid; anything restored
-from a backup as root has to be chowned or the real app cannot read its own files.
-
-This is a **product finding, not just a test-fixture issue**: anyone restoring save data via adb
-will hit it. That is why the fix has two halves:
-
-* **Test fixture** — `.github/scripts/run-premise-test.sh` now looks up the proxy's uid via
-  `dumpsys package` and `chown -R`s the planted tree to it, then `chmod 771`.
-* **Product** — `ShellCommands.restoreOwnership(userId, packageName)` was added, wired into
-  `fullRenameAsideRunbook` as step 6b (after `renameBack`), exposed through
-  `MainViewModel.ShellCommandSet` and shown in the Shell tab. `renameBack` now warns that `mv`
-  preserves ownership but an adb restore does not.
-
-### Uncommitted at the moment of stopping
-
-```
- M .github/scripts/run-premise-test.sh          # chown planted fixtures to the proxy uid
- M app/src/main/kotlin/dev/understudy/shell/ShellBackend.kt   # + restoreOwnership()
- M app/src/main/kotlin/dev/understudy/ui/MainViewModel.kt     # + restoreOwnership in command set
- M app/src/main/kotlin/dev/understudy/ui/RootUi.kt            # + "5 · Repair ownership" block
- M app/src/test/kotlin/dev/understudy/shell/ShellCommandsTest.kt  # + 2 ownership tests
-```
-
-**These five files were never built or tested.** `restoreOwnership` was rewritten once already
-because a Python heredoc mangled the `${'$'}` shell-variable escapes; the current text looks
-syntactically correct but that is unverified. So the immediate next actions are:
-
-```bash
-./tools/dtsync
-./tools/dtbuild ":app:assembleDebug :app:testDebugUnitTest --rerun-tasks"   # expect 68 tests
-git add -A && git commit && REPO=understudy ./tools/ghpush origin main      # then watch CI
-```
-
-Expected test count after this lands: **68** (66 + the two new ownership tests).
+1. **Production signing vs the `signature`-level bridge permission.** The single largest gap, and
+   it is a design problem rather than a task. The proxy's provider is guarded by a
+   `signature`-level permission, so app and proxy must share a signer. In CI they do — both use
+   the committed test keystore. In production the proxy is signed with a per-install
+   `SigningIdentity` key, which cannot match a build-time release key, so a signed release would
+   install a proxy that every bridge call fails against. The fix is for the proxy to verify the
+   caller against the *generator's* certificate, baked in at generation time, rather than against
+   its own. Until then release output is deliberately unsigned.
+2. **Wireless-ADB `ShellBackend`.** Only the manual command-generating backend ships, by choice: a
+   backend that claims to be available and then cannot execute is worse than none. Note the
+   finding in section 4 — a plain uid-2000 shell cannot reach another user's storage, so the
+   runbook the backend would drive needs root, and self-paired wireless ADB lands in uid 2000.
+   That has to be reconciled before the backend is worth writing.
+3. **OEM testing** — MIUI/HyperOS, ColorOS, One UI. Everything verified so far is AOSP
+   `target: default` on API 34/35 emulators.
+4. **The installer UX on a device.** CI installs with `adb install --user`; the
+   `PackageInstaller` session path, `STATUS_PENDING_USER_ACTION` and the per-profile
+   `REQUEST_INSTALL_PACKAGES` grant flow are unexercised.
+5. **SAF writes** to a user-picked tree, grant persistence across reboot, and the
+   `hasFragileUserData` "Keep app data" checkbox on a current build.
+6. **Recovery from process death** mid-transfer.
+7. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
 
 ---
+
+## 4. Milestone 4: the premise, verified
+
+CI run #18 is green: `OK (10 tests)` in the instrumented suite and `PREMISE VERIFIED` on both
+API 34 and API 35. A proxy APK generated at runtime, installed for a secondary user, reads and
+writes that user's `Android/data/<pkg>` and `Android/obb/<pkg>`, streams the bytes to another app
+over Binder, and `pm uninstall -k` preserves the directories afterwards.
+
+It took runs #10–#18. Three separate defects were stacked, and each one hid the next:
+
+**1. The uid lookup could never have worked.** `dumpsys package <pkg> | grep userId=` matches
+nothing on API 34+: Android 14 renamed the field to `appId=` (AOSP `Settings.java`:
+`pw.print("  appId="); pw.println(ps.getAppId())`). And the value in either field is the **app
+id**, shared by every user, while FUSE attributes app-specific storage by the **per-user** uid —
+`userId * 100000 + appId`, so `u10_a148` is 1010148. Chowning to the bare appId leaves user 10's
+files owned by a user-0-range uid and the app still cannot read them.
+
+The reliable source is `pm list packages -U --user N <pkg>`: `PackageManagerShellCommand` prints
+`applicationInfo.uid`, which `PackageInfoUtils.initForUser` computes as
+`UserHandle.getUid(userId, appId)` — already per-user, stable format, every API level, and `-u`
+also covers the retained state `pm uninstall -k` leaves behind. `--user` is mandatory; the
+default queries user 0. CI cross-checks it against `stat -c %u /data/user/N/<pkg>`, the ground
+truth installd creates.
+
+Two more traps in the same command: `UID` is **read-only in bash**, so `UID=$(...)` aborts the
+operator's shell before any chown runs; and `chmod 771` clears the setgid bit the platform relies
+on (its mode is 2770, not 771), so ownership repair must chown the owner only.
+
+**2. The data root was one directory too high.** `rootDir("data")` was
+`getExternalFilesDir(null).parentFile.parentFile`, which assumes the platform returns
+`.../Android/data/<pkg>/files`. On API 34/35 it returns `.../Android/data/<pkg>`, so two levels up
+landed on `.../Android/data` — the shared parent of every package's private storage, and exactly
+what scoped storage hides from all apps. Listing it returned `AccessDeniedException`, which read
+as "the premise is false" when the restriction was working correctly on a path we should never
+have pointed at. Meanwhile obb worked, because its path was built with the package segment
+intact. That asymmetry is what made it look like a platform difference between data and obb
+rather than a bug in one of two sibling expressions.
+
+**3. The write test contradicted the suite it lived in.** It confirmed a bridge write by stat'ing
+the path *from the test app's uid* — which the platform forbids, and which
+`thePlatformStillHidesOtherPackagesPrivateStorageFromUs` asserts two tests later. Only one of the
+two could ever pass. "Did my write reach the real filesystem?" is answerable only from inside the
+proxy, so the bridge now has `statPath`, which reports exists/isDirectory/size plus the canonical
+path the platform resolved.
+
+### The lesson worth carrying
+
+For a claim about what a process can see, the only admissible evidence is **that process's own
+report**. Five runs of increasingly subtle external observation — mount namespaces, inode
+identity, logcat filters, reading MediaProvider source — built a correct and complete picture of
+everything except the one number that mattered, because none of them asked the proxy what it
+thought its own root directory was. `ProxyFileBridge.selfDiagnostic` exists so that question can
+always be asked, in CI and from a support request on a real device.
+
+Second lesson: `File.listFiles()` returns null for both EACCES and ENOENT and never surfaces
+errno. Every "permission denied" string in this project was an inference until the diagnostics
+used `java.nio.file`, whose `AccessDeniedException` versus `NoSuchFileException` is the
+distinction that mattered. There is no NDK on the CI runner and no compiler for a static Android
+binary, so a C probe was not an option — that was verified, not assumed.
+
+### Two findings that changed the product, not just the tests
+
+**FUSE attributes app-specific storage by owning uid.** Run #10's `ls -laR` is the evidence: the
+`files/` directory the proxy created through FUSE is `u10_a148 ext_data_rw` mode 2770, while the
+`planted/` directory root created next to it stayed `root ext_data_rw` and was invisible to the
+proxy. So restoring save data via adb as root leaves it **unreadable by the app that owns it**,
+presenting as an empty directory — indistinguishable from "the data is gone". This is now
+`ShellCommands.restoreOwnership` and step 6b of the rename-aside runbook; the original design had
+no ownership repair at all.
+
+**A plain `adb shell` cannot reach another user's storage.** Run #12 dropped to uid 2000
+(`u:r:shell:s0`) and got `Permission denied` on `/storage/emulated/10`, on
+`/storage/emulated/10/Android/data/<pkg>`, on reading a file inside it, and on `/data/media/10`.
+Root was refused the FUSE view too (run #11: even uid 0 gets EACCES on `/storage/emulated/10`).
+
+This **contradicts the research the project started from**, which assumed uid 2000 is exempt from
+the FUSE filter for every user's tree. On API 34/35 AOSP it is exempt only within its own user.
+Consequences:
+
+* the runbook's `mv /storage/emulated/N/...` steps need **root**, not merely adb, and should use
+  the raw `/data/media/N/...` paths, since root is denied the FUSE view;
+* `chown` needs `CAP_CHOWN` regardless, so ownership repair was always root-or-su-only;
+* on a production device without root there is **no** shell path into another user's private
+  storage. The unprivileged flows — install into one's own profile, `hasFragileUserData`'s "Keep
+  app data" checkbox, keep-installed-and-hidden — are the whole product for those users, not a
+  subset of it.
+
+Still unverified: whether OEM builds differ. This is AOSP `target: default` on API 34 and 35.
+
+### Signature-level permission in production — the next real problem
+
+The bridge is guarded by a `signature`-level permission, so the app and the proxy it generates
+must share a signer. In CI they do: both are signed with the committed test keystore. In
+production the proxy is signed with a per-install `SigningIdentity` key, which **cannot** match a
+build-time release key. So a signed release build would install a proxy that every bridge call
+fails against with `SecurityException`.
+
+That is why release signing is deliberately opt-in via an uncommitted `keystore.properties` and
+why the release output stays unsigned without it: shipping a release build that looks finished
+but cannot talk to its own proxy is worse than an obviously unsigned one. The fix is for the
+proxy to verify the caller against the *generator's* certificate (baked in at generation time)
+rather than against its own, which is what a `signature`-level permission cannot express. Not
+implemented; see `research/05-milestone4-premise-verified.md`.
 
 ## 5. Things that will bite you
 
