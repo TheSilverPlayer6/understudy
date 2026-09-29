@@ -90,7 +90,15 @@ object ShellCommands {
      */
     fun listUsers(): String = "adb shell pm list users"
 
-    /** Absolute path of a root directory for [packageName] in user [userId]. */
+    /**
+     * Absolute path of a root directory for [packageName] in user [userId], **as the app itself
+     * sees it** through the FUSE mount.
+     *
+     * These are the paths to show a user and to compare against what an app reports, because
+     * they are what the platform documents. They are NOT the paths a shell command should use
+     * for another user: neither uid 2000 nor root can read them (measured on API 34/35), so
+     * anything the app generates for an operator to run uses [rawDataDir]/[rawObbDir] instead.
+     */
     fun dataDir(userId: Int, packageName: String): String = "$EMULATED/$userId/Android/data/$packageName"
 
     fun obbDir(userId: Int, packageName: String): String = "$EMULATED/$userId/Android/obb/$packageName"
@@ -261,13 +269,28 @@ object ShellCommands {
     }
 
     /** Inspects what is actually present, before and after any of the above. */
-    fun inspect(userId: Int, packageName: String): String = listOf(
-        "# What is on disk for user $userId right now?",
-        "adb shell ls -la '$EMULATED/$userId/Android/data/' | grep -F '$packageName' || echo '  (nothing in data)'",
-        "adb shell ls -la '$EMULATED/$userId/Android/obb/'  | grep -F '$packageName' || echo '  (nothing in obb)'",
-        "adb shell pm list packages --user $userId | grep -F '$packageName' || echo '  (not installed for user $userId)'",
-        "adb shell dumpsys package $packageName | grep -E 'codePath|signatures|installed=|userId=|appId=' | head -20",
-    ).joinToString("\n")
+    fun inspect(userId: Int, packageName: String): String {
+        val data = rawDataDir(userId, packageName)
+        val obb = rawObbDir(userId, packageName)
+        return listOf(
+            "# What is on disk for user $userId right now?",
+            "#",
+            "# Reads the RAW lower filesystem, because that is the only place a shell can see",
+            "# another user's private storage: uid 2000 is refused /storage/emulated/$userId and",
+            "# so is root (measured on API 34/35). Reading the FUSE view here would print",
+            "# 'nothing in data' for data that exists, which is the one wrong answer this app",
+            "# must never give — it is indistinguishable from 'your saves are gone'.",
+            "# Needs root for the first two lines; the pm/dumpsys lines work without it.",
+            "adb shell ls -lan '$data' 2>&1 | head -20 || true",
+            "adb shell ls -lan '$obb' 2>&1 | head -20 || true",
+            "adb shell pm list packages -U --user $userId | grep -F '$packageName' || echo '  (not installed for user $userId)'",
+            // The dumpsys field was renamed: `userId=` up to Android 13, `appId=` from 14 on.
+            // Either way the value is the shared app id, not this user's uid — `pm -U` above is
+            // the line that prints the per-user one. Both names are grepped so the output is
+            // useful whichever platform the operator is on.
+            "adb shell dumpsys package $packageName | grep -E 'codePath|signatures|installed=|userId=|appId=' | head -20",
+        ).joinToString("\n")
+    }
 
     /**
      * The complete conflict-resolution runbook, in order.

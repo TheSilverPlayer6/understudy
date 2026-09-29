@@ -64,6 +64,30 @@ class ShellCommandsTest {
     }
 
     /**
+     * `inspect` must read the raw filesystem too.
+     *
+     * It used to `ls /storage/emulated/<user>/Android/data/`, which returns Permission denied
+     * for both uid 2000 and root, and the command's own `|| echo '(nothing in data)'` fallback
+     * then prints a confident lie. For an app whose entire purpose is rescuing data, "nothing in
+     * data" when the data is sitting right there is the single worst output it could produce —
+     * it is indistinguishable from the outcome the user is afraid of.
+     */
+    @Test
+    fun `inspect reads the raw filesystem rather than reporting a lie`() {
+        val script = ShellCommands.inspect(user, pkg)
+
+        assertTrue("/data/media/$user/Android/data/$pkg" in script, script)
+        assertTrue("/data/media/$user/Android/obb/$pkg" in script, script)
+        assertFalse(
+            "ls -la '/storage/emulated/" in script,
+            "a shell cannot read another user's FUSE view; this would print a false " +
+                "'nothing in data':\n$script",
+        )
+        // The per-user uid source has to be the one that actually prints it.
+        assertTrue("pm list packages -U --user $user" in script, script)
+    }
+
+    /**
      * The rename steps must operate on the RAW lower filesystem and must say they need root.
      *
      * The original runbook used `/storage/emulated/<user>/...` on the theory that uid 2000 is
