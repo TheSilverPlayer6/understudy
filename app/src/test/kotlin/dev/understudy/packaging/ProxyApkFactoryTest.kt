@@ -22,11 +22,23 @@ import kotlin.test.assertTrue
  */
 class ProxyApkFactoryTest {
 
+    /**
+     * Locates the template APK.
+     *
+     * The **committed asset is preferred**, and deliberately so: it is what the app actually
+     * ships, and it exists in a fresh checkout. The `:proxy` build output is only a fallback for
+     * a local run where someone has just rebuilt the proxy.
+     *
+     * Getting this order wrong makes the test skip itself silently in CI, because
+     * `:app:testDebugUnitTest` does not depend on `:proxy:assembleRelease` and so runs before any
+     * proxy APK exists. A skipped test that was supposed to produce the artifact the next CI step
+     * verifies is exactly the kind of quiet failure worth designing out.
+     */
     private fun templateApk(): File? {
         val candidates = listOf(
+            File("src/main/assets/proxy-template.apk"),
+            File("../app/src/main/assets/proxy-template.apk"),
             File("../proxy/build/outputs/apk/release/proxy-release.apk"),
-            File("build/generated/proxyAssets/proxy-template.apk"),
-            File("../app/build/generated/proxyAssets/proxy-template.apk"),
         )
         return candidates.firstOrNull { it.isFile }
     }
@@ -38,7 +50,13 @@ class ProxyApkFactoryTest {
     fun `generates an installable proxy apk for an arbitrary package`() {
         val template = templateApk()
         if (template == null) {
-            println("SKIP: no :proxy release APK found; run a full project build first")
+            // Loud, not silent: this test's side effect is the artifact CI verifies with
+            // apksigner, so a skip must be impossible to miss.
+            System.err.println(
+                "ProxyApkFactoryTest SKIPPED: no template APK found. Looked for " +
+                    "src/main/assets/proxy-template.apk and ../proxy/build/outputs/apk/release/" +
+                    "proxy-release.apk. Run ./gradlew :app:syncProxyTemplate."
+            )
             return
         }
 
@@ -97,7 +115,11 @@ class ProxyApkFactoryTest {
 
     @Test
     fun `generated apk for two different targets differs only in identity`() {
-        val template = templateApk() ?: return
+        val template = templateApk()
+        if (template == null) {
+            System.err.println("ProxyApkFactoryTest SKIPPED: no template APK found")
+            return
+        }
         val identity = SigningIdentity.generate("Understudy Test")
         val factory = ProxyApkFactory(identity)
 
@@ -119,7 +141,11 @@ class ProxyApkFactoryTest {
 
     @Test
     fun `template identity is rejected as a target`() {
-        val template = templateApk() ?: return
+        val template = templateApk()
+        if (template == null) {
+            System.err.println("ProxyApkFactoryTest SKIPPED: no template APK found")
+            return
+        }
         val factory = ProxyApkFactory(SigningIdentity.generate("Understudy Test"))
         // Renaming the template to itself would produce a no-op patch, which the patcher
         // treats as an error because it means the template asset is wrong.
