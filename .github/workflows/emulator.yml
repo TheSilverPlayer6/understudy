@@ -72,7 +72,11 @@ jobs:
             ls -ld "$ANDROID_HOME"
           fi
           yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          $SUDO "$SDKMANAGER" --verbose "platform-tools" "platforms;android-37" "build-tools;37.0.0" 2>&1 | tail -25
+          # Only platform-tools and build-tools are pinned. The *platform* is left to AGP's
+          # auto-provisioning: it knows the exact package id matching compileSdk, whereas
+          # hardcoding "platforms;android-37" fails because the real ids are
+          # "android-37.0" / "android-37.2".
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "build-tools;37.0.0" 2>&1 | tail -25
           $SUDO "$SDKMANAGER" --list_installed
           # sudo-installed files can end up root-owned, which then breaks Gradle's own SDK
           # writes; hand them back to the runner user.
@@ -140,7 +144,11 @@ jobs:
           export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
           if [ -w "$ANDROID_HOME" ]; then SUDO=""; else SUDO="sudo -E"; fi
           yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          $SUDO "$SDKMANAGER" --verbose "platform-tools" "platforms;android-37" "build-tools;37.0.0" 2>&1 | tail -25
+          # Only platform-tools and build-tools are pinned. The *platform* is left to AGP's
+          # auto-provisioning: it knows the exact package id matching compileSdk, whereas
+          # hardcoding "platforms;android-37" fails because the real ids are
+          # "android-37.0" / "android-37.2".
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "build-tools;37.0.0" 2>&1 | tail -25
           [ -n "$SUDO" ] && sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME" || true
 
       # GitHub-hosted Linux runners expose /dev/kvm, but the udev rules leave it root-only.
