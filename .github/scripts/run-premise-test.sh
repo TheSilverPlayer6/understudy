@@ -203,7 +203,7 @@ log "confirm the app itself CANNOT read those bytes (the restriction is real)"
 # 10's FUSE view, so treat this as informational. The authoritative control is the
 # instrumented `thePlatformStillHidesOtherPackagesPrivateStorageFromUs`, which runs in a
 # proper user-10 process. Expected to fail; `|| true` keeps the script going.
-adb shell "run-as --user $USER_ID $APP_PKG ls '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
+adb shell "run-as $APP_PKG --user $USER_ID ls '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
 
 log "clear logcat and start capturing"
 adb logcat -c 2>/dev/null || true
@@ -217,10 +217,66 @@ log "probe the provider directly from the shell (bypasses our client)"
 # app resolves the authority.
 adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -20 || true
 adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data/planted" 2>&1 | head -20 || true
+# Discriminator: `files/` was created by the proxy ITSELF through its own view of the data
+# root; `planted/` was created by root on the lower fs. If files lists but planted does not,
+# the proxy's data view only contains what went through its own access path.
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data/files" 2>&1 | head -8 || true
+echo "-- retry the data root listing (rules out a first-touch race) --"
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -8 || true
 echo "-- call ping --"
 adb shell content call --user "$USER_ID" --uri "content://$TARGET_PKG" --method ping 2>&1 | head -20 || true
 echo "-- what the proxy actually sees on disk --"
 adb shell ls -laR "/data/media/$USER_ID/Android/data/$TARGET_PKG" 2>&1 | head -30 || true
+
+# Run #12 narrowed the failure to the DATA root only: with the whole tree chowned to the
+# proxy's per-user uid, `obb` became fully readable through the bridge while `data` still
+# reported "cannot list (permission denied)" for its root and "no such entry" for a child
+# that provably exists on the lower fs. Since Android 11 an app's own Android/data/<pkg> is
+# supposed to reach it through a *bind mount of the lower fs* that zygote installs at fork
+# (Zygote.cpp BindMountStorageDirs: tmpfs over Android/{data,obb}, then a per-package bind
+# mount from /mnt/pass_through), while the FUSE daemon outright refuses to serve those paths
+# ("Emulated storage bind-mounts app-private data directories, and so these should not be
+# accessible through FUSE anyway"). Two candidate explanations remain, and they have
+# opposite fixes, so measure instead of guessing:
+#   (a) the data bind mount is missing or points somewhere unexpected, so the proxy is
+#       talking to the FUSE daemon, which refuses it;
+#   (b) the mount is right but something about the pre-existing directory differs from obb's
+#       (data was mode 2770 group ext_data_rw, obb 2771 group ext_obb_rw).
+# Everything below is diagnostic and must never change the verdict.
+log "diagnose the proxy's view of its own data root"
+PROXY_PID="$(adb shell pidof "$TARGET_PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+echo "proxy pid: ${PROXY_PID:-<not running>}"
+if [ -n "${PROXY_PID:-}" ]; then
+  echo "-- storage-related properties --"
+  adb shell getprop | grep -iE "fuse|sdcardfs|vold.*isolation|storage" | head -20 || true
+
+  echo "-- mount namespace of the proxy: what is mounted over Android/{data,obb} --"
+  # A tmpfs over Android/data plus a bind mount of the package dir is the expected shape.
+  # If the bind mount is absent for data but present for obb, explanation (a) is confirmed.
+  adb shell "cat /proc/$PROXY_PID/mountinfo" 2>&1 \
+    | grep -E "Android/(data|obb)|/storage/emulated|pass_through" | head -30 || true
+
+  echo "-- the data root as the PROXY sees it (via /proc/pid/root) vs the lower fs --"
+  adb shell "ls -lan '/proc/$PROXY_PID/root/storage/emulated/$USER_ID/Android/data/$TARGET_PKG' 2>&1 | head -12" || true
+  adb shell "ls -lan '/data/media/$USER_ID/Android/data/$TARGET_PKG' 2>&1 | head -12" || true
+
+  echo "-- inode identity: same directory or a different one? --"
+  # %d:%i differing between the two views proves the proxy is NOT looking at the lower fs
+  # directory we chowned, which is explanation (a).
+  adb shell "stat -c '%d:%i %U:%G %a %n' '/proc/$PROXY_PID/root/storage/emulated/$USER_ID/Android/data/$TARGET_PKG' 2>&1" || true
+  adb shell "stat -c '%d:%i %U:%G %a %n' '/data/media/$USER_ID/Android/data/$TARGET_PKG' 2>&1" || true
+  adb shell "stat -c '%d:%i %U:%G %a %n' '/proc/$PROXY_PID/root/storage/emulated/$USER_ID/Android/obb/$TARGET_PKG' 2>&1" || true
+  adb shell "stat -c '%d:%i %U:%G %a %n' '/data/media/$USER_ID/Android/obb/$TARGET_PKG' 2>&1" || true
+
+  echo "-- can the proxy's own uid read it? (run-as the proxy, inside its namespace) --"
+  # run-as cannot target a non-debuggable package, so this is best-effort; the uid check that
+  # matters is whether the owning uid itself is refused, which the instrumented test covers.
+  adb shell "cat '/proc/$PROXY_PID/root/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted/save.dat' 2>&1" || true
+  adb shell "cat '/proc/$PROXY_PID/root/storage/emulated/$USER_ID/Android/obb/$TARGET_PKG/main.1.com.example.planted.obb' 2>&1" || true
+
+  echo "-- what the bridge's own root resolution produced --"
+  adb shell content call --user "$USER_ID" --uri "content://$TARGET_PKG" --method ping 2>&1 | head -5 || true
+fi
 
 log "run the instrumented premise test as user $USER_ID"
 # --user is what puts the test process inside the secondary profile, so the app and the proxy
