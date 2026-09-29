@@ -25,11 +25,17 @@ class ShellCommandsTest {
         assertEquals("/storage/emulated/10/Android/data/$pkg", ShellCommands.dataDir(user, pkg))
         assertEquals("/storage/emulated/10/Android/obb/$pkg", ShellCommands.obbDir(user, pkg))
 
+        // The raw lower filesystem is what root must use: uid 0 is DENIED the FUSE view of
+        // another user (observed on API 34/35 emulators), so ownership repair targets these.
+        assertEquals("/data/media/10/Android/data/$pkg", ShellCommands.rawDataDir(user, pkg))
+        assertEquals("/data/media/10/Android/obb/$pkg", ShellCommands.rawObbDir(user, pkg))
+
         // The whole point of the app is secondary profiles: a hardcoded /sdcard or emulated/0
         // here would operate on the wrong data and look like it succeeded.
         assertFalse(ShellCommands.dataDir(user, pkg).contains("emulated/0"))
         assertTrue(ShellCommands.dataDir(0, pkg).contains("emulated/0"))
         assertTrue(ShellCommands.dataDir(11, pkg).contains("emulated/11"))
+        assertTrue(ShellCommands.rawDataDir(11, pkg).contains("/data/media/11/"))
     }
 
     @Test
@@ -119,20 +125,39 @@ class ShellCommandsTest {
     }
 
     @Test
-    fun `ownership repair targets the app uid and both roots`() {
+    fun `ownership repair targets the per-user uid on the raw filesystem`() {
         val script = ShellCommands.restoreOwnership(user, pkg)
+        // Assertions about *executable* lines only — the block also carries explanatory
+        // comments that legitimately name the wrong approaches.
+        val code = script.lineSequence().filterNot { it.trimStart().startsWith("#") }
+            .joinToString("\n")
 
         // The uid must be looked up at run time, never hardcoded: it differs per device and per
-        // install, and a wrong chown is worse than none.
-        assertTrue("dumpsys package $pkg" in script, script)
-        assertTrue("userId=" in script)
-        assertTrue("chown -R" in script)
-        assertTrue("/storage/emulated/$user/Android/data/$pkg" in script)
-        assertTrue("/storage/emulated/$user/Android/obb/$pkg" in script)
-        // 771 is what the platform itself uses for app-specific external dirs.
-        assertTrue("chmod 771" in script)
-        // A failure here must not abort a longer runbook.
-        assertTrue("|| true" in script)
+        // install, and a wrong chown is worse than none. The source must be
+        // `pm list packages -U --user N`, which prints the PER-USER uid in a stable format —
+        // NOT dumpsys, whose field was renamed from `userId=` to `appId=` in Android 14 (CI run
+        // #11 died on exactly that grep) and whose value is the shared appId either way.
+        assertTrue("pm list packages -U -u --user $user $pkg" in code, script)
+        assertFalse("dumpsys" in code, "dumpsys field names vary by API level: $code")
+        assertFalse("userId=" in code, code)
+
+        // chown must be owner-only (`uid:uid` would clobber the ext_data_rw/ext_obb_rw group
+        // the platform relies on) and hit the RAW paths — root is denied the FUSE view of
+        // another user, and uid 2000 cannot chown at all.
+        assertTrue("chown -R \$APP_UID '/data/media/$user/Android/data/$pkg'" in code, script)
+        assertTrue("chown -R \$APP_UID '/data/media/$user/Android/obb/$pkg'" in code, script)
+        assertFalse("\$APP_UID:\$APP_UID" in code, "must not clobber the group: $code")
+
+        // chmod 771 clears the setgid bit, and the platform's mode is 2770 — never chmod here.
+        assertFalse("chmod" in code, code)
+
+        // bash's UID variable is READ-ONLY; `UID=$(...)` aborts the operator's shell script.
+        assertFalse(Regex("(?m)^UID=").containsMatchIn(code), script)
+
+        // An unresolvable uid must fail loudly instead of chowning to an empty string...
+        assertTrue("[ -n \"\$APP_UID\" ]" in code, code)
+        // ...and a failing chown must not abort a longer runbook.
+        assertTrue("|| true" in code)
     }
 
     @Test

@@ -101,6 +101,42 @@ RAW_DATA="$RAW_BASE/Android/data/$TARGET_PKG"
 RAW_OBB="$RAW_BASE/Android/obb/$TARGET_PKG"
 PAYLOAD="understudy-fuse-premise-check"
 
+# Resolve the proxy's PER-USER uid and leave it in $PROXY_UID.
+#
+# This cost two full CI cycles to get right, so here is every wrong answer:
+#
+#   WRONG  `dumpsys package <pkg> | grep userId=`   — Android 14 RENAMED that field to
+#          `appId=` (AOSP Settings.java: `pw.print("  appId="); pw.println(ps.getAppId())`),
+#          so on API 34/35 the grep matches nothing and the whole run dies here (run #11).
+#   WRONG  chowning to the number dumpsys prints, whatever the field is called — it is the
+#          APP ID, shared by every user. User 10's processes run as userId*100000 + appId
+#          (u10_a148 == 1010148), and FUSE attributes Android/data/<pkg> by that per-user
+#          uid. Chowning to the bare appId leaves user 10's files owned by a user-0 uid
+#          and the proxy still cannot read them.
+#
+# Right: `pm list packages -U --user <user>` prints `package:<name> uid:<uid>` where the uid
+# is ALREADY the per-user one (AOSP PackageInfoUtils.initForUser:
+# `output.uid = UserHandle.getUid(userId, UserHandle.getAppId(...))`). Note `--user` is
+# mandatory: the default queries user 0, where the proxy is NOT installed. Cross-checked
+# against the ground truth: the CE data dir /data/user/<user>/<pkg>, which installd creates
+# owned by exactly that uid (needs root, which this script has; if stat fails we keep the
+# pm answer).
+resolve_proxy_uid() {
+  local pm_uid stat_uid
+  pm_uid=$(adb shell pm list packages -U --user "$USER_ID" "$TARGET_PKG" 2>/dev/null | tr -d '\r' \
+            | grep -F "package:$TARGET_PKG uid:" | head -1 \
+            | sed -E 's/.*uid:([0-9]+).*/\1/')
+  case "$pm_uid" in ''|*[!0-9]*) pm_uid="" ;; esac
+  stat_uid=$(adb shell stat -c %u "/data/user/$USER_ID/$TARGET_PKG" 2>/dev/null | tr -d '\r')
+  case "$stat_uid" in ''|*[!0-9]*) stat_uid="" ;; esac
+  echo "resolve_proxy_uid: pm='--user $USER_ID' -> '${pm_uid:-?}'   stat(/data/user/$USER_ID/$TARGET_PKG) -> '${stat_uid:-?}'"
+  if [ -n "$pm_uid" ] && [ -n "$stat_uid" ] && [ "$pm_uid" != "$stat_uid" ]; then
+    echo "resolve_proxy_uid: WARNING pm($pm_uid) != stat($stat_uid); trusting stat"
+  fi
+  PROXY_UID="${stat_uid:-$pm_uid}"
+  [ -n "$PROXY_UID" ]
+}
+
 plant() {
   local base="$1"
   adb shell "
@@ -110,29 +146,33 @@ plant() {
     echo -n '$PAYLOAD' > '$base/Android/obb/$TARGET_PKG/main.1.com.example.planted.obb' || exit 1
   " || return 1
 
-  # OWNERSHIP MATTERS, and this cost a full CI cycle to find.
+  # OWNERSHIP MATTERS, and this cost a full CI cycle to find (run #10).
   #
-  # Writing as root leaves the files `root:ext_data_rw` mode 770, and the proxy — which runs as
-  # u10aNNN — then gets EACCES from FUSE on its *own* app-specific directory, surfacing as
-  # listFiles() == null and "cannot list: ... (permission denied)".
+  # Writing as root leaves the files `root:ext_data_rw` mode 660/2770, and the proxy — which
+  # runs as u10_aNNN — then gets EACCES from FUSE on its *own* app-specific directory,
+  # surfacing as listFiles() == null and "cannot list: ... (permission denied)". Run #10's
+  # `ls -laR` is the evidence: the `files/` dir the proxy created through FUSE is
+  # `u10_a148 ext_data_rw`, the root-planted `planted/` next to it stayed `root ext_data_rw`
+  # and was invisible to the proxy.
   #
-  # The FUSE layer attributes app-specific external storage by owning uid, not merely by path.
-  # The platform creates these directories as the app's uid; anything restoring data from a
-  # backup has to do the same or the real app (and our proxy) cannot read it back.
-  local app_uid
-  app_uid=$(adb shell dumpsys package "$TARGET_PKG" 2>/dev/null \
-              | grep -m1 -oE "userId=[0-9]+" | cut -d= -f2 | tr -d '\r')
-  if [ -z "$app_uid" ]; then
+  # The FUSE layer attributes app-specific external storage by owning uid, not merely by
+  # path. The platform creates these directories as the app's per-user uid; anything
+  # restoring data from a backup has to do the same or the real app (and our proxy) cannot
+  # read it back.
+  if ! resolve_proxy_uid; then
     echo "!! could not determine the uid of $TARGET_PKG; leaving files root-owned"
     return 1
   fi
-  echo "proxy uid = $app_uid; chowning planted data to it"
+  echo "proxy per-user uid = $PROXY_UID; chowning planted data to it"
+  # OWNER-ONLY chown (no `:group`): the setgid'd parent dirs already gave the planted dirs
+  # the platform's own group (ext_data_rw / ext_obb_rw) and mode (2770 dirs / 660 files).
+  # Do NOT chmod them — `chmod 771` clears the setgid bit the platform relies on, and the
+  # platform's mode is 770, not 771.
   adb shell "
-    chown -R '$app_uid:$app_uid' '$base/Android/data/$TARGET_PKG' || exit 1
-    chown -R '$app_uid:$app_uid' '$base/Android/obb/$TARGET_PKG'  || exit 1
-    chmod 771 '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted' || true
-    chmod 771 '$base/Android/obb/$TARGET_PKG' || true
-    ls -lan '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted'
+    chown -R '$PROXY_UID' '$base/Android/data/$TARGET_PKG' || exit 1
+    chown -R '$PROXY_UID' '$base/Android/obb/$TARGET_PKG'  || exit 1
+    ls -lan '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted' '$base/Android/obb/$TARGET_PKG'
+    stat -c '%u %g %a %n' '$base/Android/data/$TARGET_PKG' '$base/Android/data/$TARGET_PKG/planted/save.dat' '$base/Android/obb/$TARGET_PKG'
   "
 }
 
@@ -157,9 +197,13 @@ fi
 echo "planted under $PLANTED_BASE"
 
 log "confirm the app itself CANNOT read those bytes (the restriction is real)"
-# Run as the app's own uid in user 0 for a control: this is the failure mode the whole project
-# works around. Expected to fail; `|| true` keeps the script going.
-adb shell "run-as $APP_PKG ls '$PLANTED_BASE/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
+# Run as the app's own uid inside user 10 for a control: this is the failure mode the whole
+# project works around. It must go through the FUSE path — an app uid cannot read the raw
+# /data/media lower fs at all, and note the shell's mount namespace may not even carry user
+# 10's FUSE view, so treat this as informational. The authoritative control is the
+# instrumented `thePlatformStillHidesOtherPackagesPrivateStorageFromUs`, which runs in a
+# proper user-10 process. Expected to fail; `|| true` keeps the script going.
+adb shell "run-as --user $USER_ID $APP_PKG ls '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
 
 log "clear logcat and start capturing"
 adb logcat -c 2>/dev/null || true
@@ -199,6 +243,36 @@ wait "$LOGCAT_PID" 2>/dev/null || true
 log "proxy-side logcat (bridge, provider, crashes)"
 grep -iE "UnderstudyBridge|ProxyFileBridge|AndroidRuntime|FATAL|ActivityManager.*$TARGET_PKG|ContentProvider|SecurityException|FileNotFound" \
   premise-logs/logcat.log | head -60 || echo "(no matching logcat lines)"
+
+log "probe: what can a plain uid-2000 adb shell see? (runbook feasibility, informational)"
+# The rename-aside runbook the app generates assumes a plain `adb shell` (uid 2000) can mv
+# inside /storage/emulated/<user>. Everything above ran as ROOT, and root was DENIED on the
+# FUSE view of user 10 (run #11: `mkdir /storage/emulated/10` -> Permission denied), so the
+# uid-2000 case has never actually been observed anywhere. Settle it with evidence: unroot,
+# look, re-root. Purely informational — it must never change the suite's verdict, so every
+# command is best-effort and timeboxed.
+set +e
+if [ "$HAVE_ROOT" = "1" ]; then
+  timeout 60 adb unroot >/dev/null 2>&1
+  timeout 120 adb wait-for-device
+  sleep 3
+  echo "-- identity now: $(adb shell id 2>/dev/null | head -1 | tr -d '\r') --"
+  adb shell "ls -ld '/storage/emulated/$USER_ID' 2>&1"
+  adb shell "ls -la '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG' 2>&1 | head -8"
+  adb shell "ls -la '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted' 2>&1 | head -5"
+  adb shell "cat '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/planted/save.dat' 2>&1"
+  adb shell "ls -ld '/data/media/$USER_ID' 2>&1"
+  echo "-- restoring root --"
+  timeout 60 adb root >/dev/null 2>&1
+  timeout 120 adb wait-for-device
+  sleep 3
+  echo "-- identity restored: $(adb shell id 2>/dev/null | head -1 | tr -d '\r') --"
+else
+  echo "(no root in this run; shell was already uid 2000)"
+  adb shell "ls -la '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG' 2>&1 | head -8"
+fi
+set -e
+
 # `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
 if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then
   echo "!! instrumented tests reported failures"
@@ -214,13 +288,16 @@ log "teardown: uninstall the proxy KEEPING its data"
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave
 # Android/data behind, which is what the app's teardown strategy depends on.
 adb shell pm uninstall -k --user "$USER_ID" "$TARGET_PKG" 2>&1 || true
-adb shell "ls -la '$DATA_DIR' 2>&1 || echo '  (data dir gone — -k did NOT preserve it!)'" \
+# Verify on the RAW path: root gets EACCES on the FUSE view of another user (run #11 proved
+# it), so checking $DATA_DIR here would report a false "-k did not preserve it".
+adb shell "ls -la '$RAW_DATA' 2>&1 || echo '  (data dir gone — -k did NOT preserve it!)'" \
   | tee premise-logs/after-uninstall.log
 
-if adb shell "[ -d '$DATA_DIR/planted' ]" 2>/dev/null; then
+if adb shell "[ -d '$RAW_DATA/planted' ]" 2>/dev/null; then
   echo "OK: 'pm uninstall -k' preserved the data directory"
+  adb shell "ls -lan '$RAW_DATA/planted'; cat '$RAW_DATA/planted/save.dat'; echo" || true
 else
-  echo "!! 'pm uninstall -k' did NOT preserve $DATA_DIR/planted"
+  echo "!! 'pm uninstall -k' did NOT preserve $RAW_DATA/planted"
   exit 1
 fi
 

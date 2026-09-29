@@ -95,6 +95,17 @@ object ShellCommands {
 
     fun obbDir(userId: Int, packageName: String): String = "$EMULATED/$userId/Android/obb/$packageName"
 
+    /**
+     * The RAW lower filesystem behind the FUSE view above: what `/storage/emulated/<userId>`
+     * is a mount of. Only root can traverse it — and, counter-intuitively, root is *denied*
+     * the FUSE view of another user (observed on API 34/35 emulators: even uid 0 gets EACCES
+     * on `/storage/emulated/10`), so root-backed operations such as [restoreOwnership] must
+     * use these paths instead.
+     */
+    fun rawDataDir(userId: Int, packageName: String): String = "/data/media/$userId/Android/data/$packageName"
+
+    fun rawObbDir(userId: Int, packageName: String): String = "/data/media/$userId/Android/obb/$packageName"
+
     /** The backup suffix used by the rename-aside sequence. */
     const val BACKUP_SUFFIX = ".understudy-bak"
 
@@ -185,30 +196,51 @@ object ShellCommands {
      * sitting right there on disk. The FUSE layer attributes `Android/data/<pkg>` by **owning
      * uid**, not merely by path: the platform creates those directories as the app's uid, and
      * anything written as root (an adb restore, a `cp` from a backup, a `tar -x`) stays
-     * `root:ext_data_rw` mode 770. The owning app then gets EACCES on its *own* directory, and
-     * `File.listFiles()` returns null — which looks exactly like "the data is gone".
+     * `root:ext_data_rw` mode 2770/660. The owning app then gets EACCES on its *own* directory,
+     * and `File.listFiles()` returns null — which looks exactly like "the data is gone".
      *
-     * Verified on an API 34 emulator: a proxy installed as the target package could not list a
-     * root-owned `Android/data/<pkg>` until the tree was chowned to its uid.
+     * Verified on API 34/35 emulators: a proxy installed as the target package could not see a
+     * root-planted `Android/data/<pkg>/planted` until the tree was chowned to its uid — and the
+     * uid that works is the **per-user** one.
      *
-     * Run this after any adb-side restore, and after [renameBack] if the backup was made as root.
+     * Two traps this sequence is written around, both paid for in CI cycles:
+     *  - `dumpsys package` printed `userId=<appId>` up to Android 13 and `appId=<appId>` from
+     *    Android 14 on — and in BOTH cases that number is the app id, shared by every user, NOT
+     *    the uid the app's processes run as. User [userId]'s processes run as
+     *    `userId * 100000 + appId` (`u10_a148` == 1010148). `pm list packages -U --user N`
+     *    prints the per-user uid directly, on every API level, so that is what we parse.
+     *  - `UID` is a READ-ONLY variable in bash: `UID=$(...)` aborts the operator's script with
+     *    "UID: readonly variable". Hence `APP_UID` below.
+     *
+     * Requires root (`adb root` on userdebug/eng, `su` on rooted production): chown needs
+     * CAP_CHOWN, and the raw `/data/media` path is root-only anyway. Root is also *denied* the
+     * FUSE view of another user, so these commands target [rawDataDir]/[rawObbDir]. Run after
+     * any adb-side restore, and after [renameBack] if the backup was made as root.
      */
     fun restoreOwnership(userId: Int, packageName: String): String {
-        val data = dataDir(userId, packageName)
-        val obb = obbDir(userId, packageName)
-        // NOTE the ${'$'} escapes: UID is a *shell* variable evaluated on the operator's
+        val data = rawDataDir(userId, packageName)
+        val obb = rawObbDir(userId, packageName)
+        // NOTE the ${'$'} escapes: APP_UID is a *shell* variable evaluated on the operator's
         // machine, so it must survive Kotlin string interpolation literally.
         return listOf(
             "# Make the app's own uid own its private storage again.",
+            "# Needs root: run `adb root` first (userdebug/eng), or the adb shell lines via su.",
             "# Without this, data restored via adb is unreadable BY THE APP ITSELF: FUSE",
             "# attributes Android/data/<pkg> by owning uid, so root-owned files are denied",
             "# even to the package that owns them, and it presents as an empty directory.",
-            "UID=${'$'}(adb shell dumpsys package $packageName | grep -m1 -oE 'userId=[0-9]+' | cut -d= -f2 | tr -d '\\r')",
-            "echo \"uid=${'$'}UID\"",
-            "adb shell \"chown -R ${'$'}UID:${'$'}UID '$data' 2>/dev/null || true\"",
-            "adb shell \"chown -R ${'$'}UID:${'$'}UID '$obb' 2>/dev/null || true\"",
-            "adb shell \"chmod 771 '$data' 2>/dev/null || true\"",
-            "adb shell ls -lan '$data'",
+            "#",
+            "# `pm list packages -U --user $userId` prints the PER-USER uid directly; `-u` also",
+            "# covers the retained state that `pm uninstall -k` leaves behind. `--user` is",
+            "# mandatory — the default queries user 0, where the package may not exist.",
+            "APP_UID=${'$'}(adb shell pm list packages -U -u --user $userId $packageName | tr -d '\\r' | grep -F 'package:$packageName uid:' | head -1 | sed -E 's/.*uid:([0-9]+).*/\\1/')",
+            "echo \"per-user uid=${'$'}APP_UID\"",
+            "[ -n \"${'$'}APP_UID\" ] || echo '!! no uid for $packageName as user $userId — installed or retained nowhere?'",
+            "# Owner-only chown: the ext_data_rw/ext_obb_rw group and the setgid bit must survive,",
+            "# because that is the state the platform itself creates. Do NOT chmod 771 — it clears",
+            "# setgid, and the platform's mode for these directories is 2770, not 771.",
+            "[ -n \"${'$'}APP_UID\" ] && adb shell \"chown -R ${'$'}APP_UID '$data' 2>/dev/null || true\"",
+            "[ -n \"${'$'}APP_UID\" ] && adb shell \"chown -R ${'$'}APP_UID '$obb' 2>/dev/null || true\"",
+            "adb shell \"ls -lan '$data' '$obb'\"",
         ).joinToString("\n")
     }
 
@@ -218,7 +250,7 @@ object ShellCommands {
         "adb shell ls -la '$EMULATED/$userId/Android/data/' | grep -F '$packageName' || echo '  (nothing in data)'",
         "adb shell ls -la '$EMULATED/$userId/Android/obb/'  | grep -F '$packageName' || echo '  (nothing in obb)'",
         "adb shell pm list packages --user $userId | grep -F '$packageName' || echo '  (not installed for user $userId)'",
-        "adb shell dumpsys package $packageName | grep -E 'codePath|signatures|installed=|userId=' | head -20",
+        "adb shell dumpsys package $packageName | grep -E 'codePath|signatures|installed=|userId=|appId=' | head -20",
     ).joinToString("\n")
 
     /**
