@@ -10,6 +10,10 @@ set -euo pipefail
 
 API="${1:-34}"
 TARGET_PKG="${TARGET_PKG:-com.example.targetgame}"
+# The package the *production-signed* proxy impersonates. Distinct from TARGET_PKG so the two
+# proxies coexist for the same user: TARGET_PKG is signed with the app's key (permission path),
+# PRODSIGN_PKG with a fresh random key carrying the app's certificate digest (production path).
+PRODSIGN_PKG="${PRODSIGN_PKG:-com.example.prodgame}"
 APP_PKG="${APP_PKG:-dev.understudy.debug}"
 TEST_RUNNER="${TEST_RUNNER:-androidx.test.runner.AndroidJUnitRunner}"
 USER_NAME="understudy-ci"
@@ -76,6 +80,19 @@ log "install the proxy APK for user $USER_ID"
 adb install --user "$USER_ID" -r /tmp/proxy.apk 2>&1 | tee premise-logs/install-proxy.log
 adb shell pm list packages --user "$USER_ID" | grep -F "$TARGET_PKG" \
   || { echo "!! proxy is not installed for user $USER_ID"; exit 1; }
+
+log "install the production-signed proxy for user $USER_ID"
+# Signed with a DIFFERENT key than the app, carrying the app's certificate digest — the production
+# key layout. If this file is missing the caller-auth phase below is skipped loudly rather than
+# silently passing, so a harness regression cannot masquerade as coverage.
+if [ -f /tmp/proxy-prodsign.apk ]; then
+  adb install --user "$USER_ID" -r /tmp/proxy-prodsign.apk 2>&1 | tee premise-logs/install-proxy-prodsign.log
+  adb shell pm list packages --user "$USER_ID" | grep -F "$PRODSIGN_PKG" \
+    || { echo "!! production-signed proxy ($PRODSIGN_PKG) is not installed for user $USER_ID"; exit 1; }
+else
+  echo "!! /tmp/proxy-prodsign.apk missing — the 'Generate the proxy APKs' step did not produce it"
+  exit 1
+fi
 
 log "install the app under test for user $USER_ID"
 APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
@@ -401,6 +418,43 @@ if [ "$INSTRUMENT_EXIT" -ne 0 ]; then
   echo "!! am instrument exited $INSTRUMENT_EXIT"
   exit "$INSTRUMENT_EXIT"
 fi
+
+log "run the PRODUCTION caller-auth premise test as user $USER_ID"
+# The FUSE premise above installs a proxy signed with the SAME key as the app, so it only ever
+# exercises the signature-permission path. This phase installs one signed with a DIFFERENT key
+# (a fresh per-install key) carrying the app's certificate digest — the production layout, where
+# the app cannot sign the proxy with its own build-time key. A successful call proves the digest
+# path works AND that BRIDGE is defined by the app (so the differently-signed caller can hold it);
+# a permission SecurityException here means the proxy still defines BRIDGE and the platform gate
+# fires before the proxy's own digest check ever runs.
+set +e
+adb shell am instrument -w --user "$USER_ID" \
+  -e prodTargetPackage "$PRODSIGN_PKG" \
+  -e userId "$USER_ID" \
+  -e class dev.understudy.instrumented.CallerAuthPremiseTest \
+  "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/callerauth-instrument.log
+CALLERAUTH_EXIT="${PIPESTATUS[0]}"
+set -e
+log "caller-auth instrument exit=$CALLERAUTH_EXIT"
+sleep 2
+
+log "caller-auth diagnostics (which gate produced any failure)"
+grep -hE "CALLERAUTH-DIAG" premise-logs/callerauth-instrument.log premise-logs/logcat.log 2>/dev/null \
+  | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -40 || echo "(no CALLERAUTH-DIAG lines found)"
+
+if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/callerauth-instrument.log; then
+  echo "!! production caller-auth test reported failures"
+  grep -A25 -E "FAILURES!!!|Error in " premise-logs/callerauth-instrument.log | head -70 || true
+  echo "!! CALLER-AUTH FAILED: the app could not reach a proxy signed with a different key that"
+  echo "!!   carries the app's certificate digest. In production that is every bridge call."
+  exit 1
+fi
+if [ "$CALLERAUTH_EXIT" -ne 0 ]; then
+  echo "!! caller-auth am instrument exited $CALLERAUTH_EXIT"
+  exit "$CALLERAUTH_EXIT"
+fi
+echo "CALLER-AUTH VERIFIED on API $API: the app reached a proxy signed with a DIFFERENT key"
+echo "  ($PRODSIGN_PKG) via the generator-certificate digest path."
 
 log "teardown: uninstall the proxy KEEPING its data"
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave

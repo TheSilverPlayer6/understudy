@@ -198,17 +198,37 @@ jobs:
 
       # ProxyApkFactoryTest writes a signed proxy APK for com.example.targetgame as a side effect,
       # so CI exercises exactly the code path the app uses at runtime rather than a separate
-      # generator.
-      - name: Generate the proxy APK
+      # generator. ProdSignedProxyTest additionally writes a proxy signed with a DIFFERENT (fresh
+      # random) key that carries the app's certificate digest — the production key layout, which
+      # is what the caller-auth phase of the premise script verifies.
+      - name: Generate the proxy APKs
         run: |
           set -euo pipefail
           ./gradlew --no-daemon --console=plain :app:testDebugUnitTest \
-            --tests '*ProxyApkFactoryTest*' --rerun-tasks
+            --tests '*ProxyApkFactoryTest*' --tests '*ProdSignedProxyTest*' --rerun-tasks
           APK=$(find app/build/outputs/proxy-test -name 'proxy-*.apk' | head -1)
           test -n "$APK"
           cp "$APK" /tmp/proxy.apk
           ls -l /tmp/proxy.apk
           aapt2 dump badging /tmp/proxy.apk | grep '^package:'
+          # The production caller-auth artifact lives in its own output dir so it cannot be
+          # confused with the same-key proxy above (which the jvm job verifies with head -1).
+          PRODSIGN=$(find app/build/outputs/proxy-prodsign -name 'proxy-prodsign-*.apk' | head -1)
+          test -n "$PRODSIGN" || { echo "::error::no prod-signed proxy was generated"; exit 1; }
+          cp "$PRODSIGN" /tmp/proxy-prodsign.apk
+          ls -l /tmp/proxy-prodsign.apk
+          aapt2 dump badging /tmp/proxy-prodsign.apk | grep '^package:'
+          # Guard the scenario's fidelity: the two proxies MUST have different signers, or the
+          # caller-auth test would silently exercise the permission path again and prove nothing.
+          echo "--- same-key proxy signer ---";   apksigner verify --print-certs /tmp/proxy.apk          | grep -iE 'SHA-256 digest' || true
+          echo "--- prod-signed proxy signer ---"; apksigner verify --print-certs /tmp/proxy-prodsign.apk | grep -iE 'SHA-256 digest' || true
+          A=$(apksigner verify --print-certs /tmp/proxy.apk | grep -iE 'SHA-256 digest' | head -1)
+          B=$(apksigner verify --print-certs /tmp/proxy-prodsign.apk | grep -iE 'SHA-256 digest' | head -1)
+          if [ "$A" = "$B" ]; then
+            echo "::error::prod-signed proxy has the SAME signer as the same-key proxy; the production scenario is not being tested"
+            exit 1
+          fi
+          echo "signers differ: production caller-auth scenario is faithful"
 
       # Creating a user and installing packages both need uid 2000, so the orchestration lives in
       # a shell script rather than in the test — an app cannot do either, even instrumented.
