@@ -14,7 +14,15 @@ APP_PKG="${APP_PKG:-dev.understudy.debug}"
 TEST_RUNNER="${TEST_RUNNER:-androidx.test.runner.AndroidJUnitRunner}"
 USER_NAME="understudy-ci"
 
-log() { printf '\n=== %s ===\n' "$*"; }
+LOGDIR="premise-logs"
+mkdir -p "$LOGDIR"
+
+log() { printf '\n=== %s ===\n' "$*" | tee -a "$LOGDIR/orchestration.log"; }
+
+# Echo every command into the log too: when this fails in CI the shell transcript is the only
+# evidence available, and `set -x` output is what makes an adb orchestration debuggable.
+exec > >(tee -a "$LOGDIR/orchestration.log") 2>&1
+set -x
 
 log "environment"
 adb wait-for-device
@@ -49,7 +57,7 @@ sleep 5
 adb shell pm list users
 
 log "install the proxy APK for user $USER_ID"
-adb install --user "$USER_ID" -r /tmp/proxy.apk 2>&1 | tee /tmp/premise-install-proxy.log
+adb install --user "$USER_ID" -r /tmp/proxy.apk 2>&1 | tee premise-logs/install-proxy.log
 adb shell pm list packages --user "$USER_ID" | grep -F "$TARGET_PKG" \
   || { echo "!! proxy is not installed for user $USER_ID"; exit 1; }
 
@@ -57,8 +65,8 @@ log "install the app under test for user $USER_ID"
 APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
 TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1)"
 echo "app=$APP_APK"; echo "test=$TEST_APK"
-adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee /tmp/premise-install-app.log
-adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee /tmp/premise-install-test.log
+adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
+adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
 
 log "plant known bytes in the proxy's private storage"
 # adb shell is exempt from the FUSE filter that blocks apps, which is exactly why it can write
@@ -89,15 +97,15 @@ adb shell am instrument -w --user "$USER_ID" \
   -e userId "$USER_ID" \
   -e expectPlanted true \
   -e class dev.understudy.instrumented.BridgePremiseTest \
-  "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee /tmp/premise-instrument.log
+  "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/instrument.log
 INSTRUMENT_EXIT="${PIPESTATUS[0]}"
 set -e
 
 log "instrument exit=$INSTRUMENT_EXIT"
 # `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
-if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" /tmp/premise-instrument.log; then
+if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then
   echo "!! instrumented tests reported failures"
-  grep -A20 -E "FAILURES!!!|Error in " /tmp/premise-instrument.log | head -60 || true
+  grep -A20 -E "FAILURES!!!|Error in " premise-logs/instrument.log | head -60 || true
   exit 1
 fi
 if [ "$INSTRUMENT_EXIT" -ne 0 ]; then
@@ -110,7 +118,7 @@ log "teardown: uninstall the proxy KEEPING its data"
 # Android/data behind, which is what the app's teardown strategy depends on.
 adb shell pm uninstall -k --user "$USER_ID" "$TARGET_PKG" 2>&1 || true
 adb shell "ls -la '$DATA_DIR' 2>&1 || echo '  (data dir gone — -k did NOT preserve it!)'" \
-  | tee /tmp/premise-after-uninstall.log
+  | tee premise-logs/after-uninstall.log
 
 if adb shell "[ -d '$DATA_DIR/planted' ]" 2>/dev/null; then
   echo "OK: 'pm uninstall -k' preserved the data directory"
