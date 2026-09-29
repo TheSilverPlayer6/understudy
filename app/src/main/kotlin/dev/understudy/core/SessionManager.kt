@@ -93,6 +93,11 @@ class SessionManager(
             }
             result.onSuccess { apk ->
                 _lastGenerated.value = apk
+                // Generation is finished; nothing is in flight any more, and Idle is exactly
+                // "nothing in flight". Staying in Generating would wedge the UI on its progress
+                // row (the Generate button only shows for Idle/Failed/Finished) and the
+                // re-entrance guard below would refuse to generate for any other target.
+                _state.value = SessionState.Idle
                 // Generating an APK does not install it; the next step is always the user's.
                 _events.value = SessionEvent.ApkReady(apk)
             }.onFailure { e ->
@@ -319,7 +324,12 @@ class SessionManager(
                     )
                     return false
                 }
-                val wiped = withContext(io) { runCatching { bridge?.wipeProxyData() }.isSuccess }
+                // A *dead* bridge is not a successful wipe: `runCatching { bridge?.wipe() }`
+                // would report success on a null client and wave the uninstall through with the
+                // directories in an unknown state. Require a live client AND a clean wipe.
+                val client = bridge
+                val wiped = client != null &&
+                    withContext(io) { runCatching { client.wipeProxyData() }.isSuccess }
                 if (!wiped) {
                     // Do NOT proceed to uninstall: we could not confirm the directories are
                     // empty, so a normal uninstall might still delete something.
