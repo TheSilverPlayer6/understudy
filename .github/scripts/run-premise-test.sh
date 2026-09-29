@@ -306,6 +306,14 @@ if [ -n "${PROXY_PID:-}" ]; then
   grep -iE "Invalid other package|access|denied|Android/(data|obb)|$TARGET_PKG|uid" "$MP_LOG" 2>/dev/null | head -40 || cat "$MP_LOG" 2>/dev/null | head -40
   cp "$MP_LOG" premise-logs/mediaprovider-probe.log 2>/dev/null || true
 
+  echo "-- errno: the instrumented diagnoseDataRootVisibility test reports it --"
+  # A C probe would be the direct way to get errno, but there is no NDK on the runner and no
+  # system compiler for a static Android binary, so the errno question is answered from inside
+  # the app instead: BridgePremiseTest.diagnoseDataRootVisibility lists both roots through
+  # java.io.File AND java.nio.file.Files, whose exception types distinguish AccessDenied from
+  # NoSuchFile — exactly the distinction listFiles() discards. Its DIAG lines are in
+  # premise-logs/instrument.log, printed below and grepped after the run.
+
   echo "-- does the app uid itself differ from root here? (no CAP_DAC_OVERRIDE) --"
   # If run-as works for the proxy (it is not debuggable, so this is expected to fail) we would
   # see the app's own view. Either way, record the attempt: it distinguishes "FUSE policy
@@ -366,6 +374,11 @@ else
   adb shell "ls -la '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG' 2>&1 | head -8"
 fi
 set -e
+
+log "diagnostic output from inside the app's own mount namespace"
+# These lines are the only evidence about what the app uid actually sees, as opposed to what
+# root sees. Printed whether or not the suite passed.
+grep -E "^DIAG |DIAG " premise-logs/instrument.log | head -60 || echo "(no DIAG lines found)"
 
 # `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
 if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then

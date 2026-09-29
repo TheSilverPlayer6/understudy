@@ -102,6 +102,95 @@ class BridgePremiseTest {
      *
      * If this passes, the mechanism works. If it fails, nothing else in the project matters.
      */
+    /**
+     * Diagnostic, not a premise assertion: narrows down WHERE the data root stops being visible.
+     *
+     * The obb half of the premise passes on API 34 and 35 while the data half fails, and the two
+     * trees are planted and chowned by the same command. `File.listFiles()` returns null for both
+     * EACCES and ENOENT and never surfaces errno, so the bridge's "permission denied" wording has
+     * been a guess this whole time. These probes separate the candidates without needing one:
+     *
+     *  - listing the DATA ROOT ITSELF. If the root lists but the `planted` child does not, the
+     *    problem is per-entry; if the root does not list either, it is the whole subtree.
+     *  - the proxy's OWN `files/` directory, created through its own access path. If that lists
+     *    and `planted/` does not, the difference is who created the entry, not where it lives.
+     *  - [java.nio.file.Files] instead of [java.io.File], because the NIO layer throws
+     *    `java.nio.file.AccessDeniedException` / `NoSuchFileException` — an errno distinction
+     *    `File` throws away.
+     *  - a direct read of the planted bytes, which is the thing the premise actually claims.
+     *
+     * It never fails the build: a diagnostic that can turn a real regression into noise is worse
+     * than no diagnostic. The output lands in the instrument log, which CI captures.
+     */
+    @Test
+    fun diagnoseDataRootVisibility() {
+        val uid = Process.myUid()
+        println("DIAG uid=$uid userId=${uid / PER_USER_RANGE} target=$target")
+
+        val base = File("/storage/emulated/${myUserId()}/Android")
+        for ((label, dir) in listOf(
+            "data-root" to File(base, "data/$target"),
+            "data-files" to File(base, "data/$target/files"),
+            "data-planted" to File(base, "data/$target/$PLANTED_DIR"),
+            "obb-root" to File(base, "obb/$target"),
+        )) {
+            println(
+                "DIAG $label path=${dir.absolutePath} exists=${dir.exists()} " +
+                    "isDirectory=${dir.isDirectory} canRead=${dir.canRead()} " +
+                    "canExecute=${dir.canExecute()}",
+            )
+            val names = runCatching { dir.list() }
+            val listedText = when {
+                names.isFailure -> "threw ${names.exceptionOrNull()}"
+                names.getOrNull() == null -> "null (EACCES or ENOENT; File does not say which)"
+                else -> (names.getOrNull() ?: emptyArray()).joinToString(prefix = "[", postfix = "]")
+            }
+            println("DIAG $label File.list() -> $listedText")
+            val nio = runCatching {
+                java.nio.file.Files.newDirectoryStream(dir.toPath()).use { stream ->
+                    stream.map { it.fileName.toString() }.toList()
+                }
+            }
+            // The NIO exception TYPE is the errno signal File.list() discards.
+            val nioText = if (nio.isSuccess) {
+                nio.getOrNull().toString()
+            } else {
+                val e = nio.exceptionOrNull()
+                "${e?.javaClass?.simpleName}: ${e?.message}"
+            }
+            println("DIAG $label Files.newDirectoryStream -> $nioText")
+        }
+
+        val plantedFile = File(base, "data/$target/$PLANTED_DIR/$PLANTED_FILE")
+        println("DIAG planted-file exists=${plantedFile.exists()} canRead=${plantedFile.canRead()}")
+        val read = runCatching { plantedFile.readBytes() }
+        val readText = if (read.isSuccess) {
+            val bytes = read.getOrNull() ?: ByteArray(0)
+            "read ${bytes.size} bytes: \"" + String(bytes, Charsets.UTF_8) + "\""
+        } else {
+            val e = read.exceptionOrNull()
+            "${e?.javaClass?.simpleName}: ${e?.message}"
+        }
+        println("DIAG planted-file read -> $readText")
+
+        // And through the bridge, so the two views sit next to each other in one log.
+        for ((label, root, path) in listOf(
+            Triple("bridge-data-root", StorageRoot.DATA, ""),
+            Triple("bridge-data-files", StorageRoot.DATA, "files"),
+            Triple("bridge-data-planted", StorageRoot.DATA, PLANTED_DIR),
+            Triple("bridge-obb-root", StorageRoot.OBB, ""),
+        )) {
+            val listed = runCatching { client().list(root, path).map { it.name } }
+            val bridgeText = if (listed.isSuccess) {
+                listed.getOrNull().toString()
+            } else {
+                val e = listed.exceptionOrNull()
+                "${e?.javaClass?.simpleName}: ${e?.message}"
+            }
+            println("DIAG $label -> $bridgeText")
+        }
+    }
+
     @Test
     fun plantedSaveDataIsReadableThroughTheBridge() {
         assumeTrue("CI did not plant fixtures", expectPlanted)
