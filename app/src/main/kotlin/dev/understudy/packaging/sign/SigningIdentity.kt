@@ -138,6 +138,47 @@ class SigningIdentity private constructor(
             return issuerDer to serialBytes
         }
 
+        /**
+         * Loads an identity from a PKCS#12 keystore.
+         *
+         * This exists for tests and CI, not for production. At runtime [loadOrCreate] generates a
+         * per-install identity, which is the whole point: two devices must not share a signing
+         * key, or a proxy from one would be trusted by the other.
+         *
+         * Tests need the opposite — a *fixed* key shared with the app's own debug build — because
+         * the proxy's provider is guarded by a `signature`-level permission. If the proxy APK and
+         * the app APK are signed differently the grant never happens and every bridge call fails
+         * with SecurityException, which on the JVM is invisible (Robolectric does not enforce
+         * permissions) and on a device is total.
+         *
+         * @param pkcs12 bytes of a PKCS#12 keystore
+         * @param alias the key entry to use
+         */
+        fun fromKeystore(
+            pkcs12: ByteArray,
+            password: CharArray,
+            alias: String,
+        ): SigningIdentity {
+            val keyStore = java.security.KeyStore.getInstance("PKCS12")
+            keyStore.load(pkcs12.inputStream(), password)
+            require(keyStore.containsAlias(alias)) {
+                "keystore has no alias '$alias'; contains ${keyStore.aliases().toList()}"
+            }
+            val key = keyStore.getKey(alias, password) as? PrivateKey
+                ?: throw IllegalArgumentException("'$alias' is not a private key entry")
+            val chain = keyStore.getCertificateChain(alias)
+            require(chain != null && chain.isNotEmpty()) { "'$alias' has no certificate chain" }
+            val certificate = chain[0] as X509Certificate
+
+            val (issuerDer, serialBytes) = extractIssuerAndSerial(certificate.encoded)
+            return SigningIdentity(
+                privateKey = key,
+                certificate = certificate,
+                issuerDer = issuerDer,
+                serialBytes = serialBytes,
+            )
+        }
+
         fun generate(commonName: String = "Understudy"): SigningIdentity {
             val keyPair = generateKeyPair()
             val serial = BigInteger(64, SecureRandom()).setBit(0)

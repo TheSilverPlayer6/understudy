@@ -199,7 +199,13 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
-          target: google_apis
+          # `default` (AOSP) rather than google_apis, because the test needs `adb root`.
+          # Planting fixture bytes into a *secondary* user's private storage requires uid 0:
+          # uid 2000 is exempt from the FUSE filter only inside its own mount namespace, so
+          # /storage/emulated/10 is not reachable from the default shell — and google_apis images
+          # are production-signed, so `adb root` is refused. This is also more faithful: the raw
+          # /data/media/<user> path we write to is exactly where the rename-aside trick operates.
+          target: default
           arch: x86_64
           # No snapshot: a restored one could carry a user profile or an install over from a
           # previous attempt and make a failing step look like it succeeded.

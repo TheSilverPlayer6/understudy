@@ -35,8 +35,21 @@ echo "api=$API target=$TARGET_PKG app=$APP_PKG"
 # runs as uid 2000 in the shell_data_file SELinux domain, which is what actually matters for
 # writing inside another user's Android/data.
 log "adb root (best effort)"
-adb root >/dev/null 2>&1 || echo "adb root unavailable (expected on google_apis); continuing as shell"
-adb wait-for-device
+# Root decides how we can plant fixture bytes. On a userdebug/eng image (`target: default`, i.e.
+# AOSP) `adb root` succeeds and we can write to /data/media/<user> — the *raw* storage that sits
+# underneath the FUSE view. On a production-signed google_apis image it fails, and uid 2000 has
+# no access to another user's emulated storage at all, which is what produced
+# "mkdir: '/storage/emulated/10': Permission denied".
+if adb root >/dev/null 2>&1; then
+  adb wait-for-device
+  HAVE_ROOT=1
+  echo "adb root succeeded: uid=$(adb shell id -u 2>/dev/null || echo '?')"
+else
+  HAVE_ROOT=0
+  adb wait-for-device
+  echo "adb root unavailable (production-signed image); planting will need a fallback"
+fi
+# RAW_BASE is computed after the user exists; see the planting step.
 
 log "create the secondary user profile"
 CREATE_OUT="$(adb shell pm create-user "$USER_NAME" 2>&1)"
@@ -48,6 +61,9 @@ if [ -z "${USER_ID:-}" ]; then
   exit 1
 fi
 echo "created user id $USER_ID"
+# The raw storage path for this user, i.e. what the FUSE mount at /storage/emulated/$USER_ID
+# is backed by. This is where the rename-aside trick really operates.
+RAW_BASE="/data/media/$USER_ID"
 
 log "start the new profile"
 # switch-user brings it to the foreground, which is how the app will normally be used. We also
@@ -69,24 +85,57 @@ adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-a
 adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
 
 log "plant known bytes in the proxy's private storage"
-# adb shell is exempt from the FUSE filter that blocks apps, which is exactly why it can write
-# here and the app cannot. These directories do not exist yet: the point is that the proxy must
-# be able to see data it did not create itself.
+# These directories do not exist yet, and that is the point: the proxy must be able to see data
+# it did not create itself, which is the backup/restore case the whole app exists for.
+#
+# Two candidate locations, because how we can write depends on whether we have root:
+#   /data/media/<user>/...        the RAW storage under the FUSE mount. Needs root, but it is
+#                                 exactly where the real rename-aside trick operates, and writing
+#                                 here proves the data pre-dates the proxy.
+#   /storage/emulated/<user>/...  the FUSE view. uid 2000 is normally exempt from the filter, but
+#                                 only within its OWN mount namespace — another user's emulated
+#                                 storage is not visible to it, so this needs root too.
 DATA_DIR="/storage/emulated/$USER_ID/Android/data/$TARGET_PKG"
 OBB_DIR="/storage/emulated/$USER_ID/Android/obb/$TARGET_PKG"
-adb shell "
-  set -e
-  mkdir -p '$DATA_DIR/planted'
-  mkdir -p '$OBB_DIR'
-  echo -n 'understudy-fuse-premise-check' > '$DATA_DIR/planted/save.dat'
-  echo -n 'understudy-fuse-premise-check' > '$OBB_DIR/main.1.com.example.planted.obb'
-  ls -laR '$DATA_DIR' '$OBB_DIR'
-"
+RAW_DATA="$RAW_BASE/Android/data/$TARGET_PKG"
+RAW_OBB="$RAW_BASE/Android/obb/$TARGET_PKG"
+PAYLOAD="understudy-fuse-premise-check"
+
+plant() {
+  local base="$1"
+  adb shell "
+    mkdir -p '$base/Android/data/$TARGET_PKG/planted' || exit 1
+    mkdir -p '$base/Android/obb/$TARGET_PKG' || exit 1
+    echo -n '$PAYLOAD' > '$base/Android/data/$TARGET_PKG/planted/save.dat' || exit 1
+    echo -n '$PAYLOAD' > '$base/Android/obb/$TARGET_PKG/main.1.com.example.planted.obb' || exit 1
+    ls -laR '$base/Android/data/$TARGET_PKG' '$base/Android/obb/$TARGET_PKG'
+  "
+}
+
+PLANTED_BASE=""
+if [ "$HAVE_ROOT" = "1" ]; then
+  echo "-- trying the raw lower filesystem ($RAW_BASE) --"
+  if plant "$RAW_BASE"; then PLANTED_BASE="$RAW_BASE"; fi
+fi
+if [ -z "$PLANTED_BASE" ]; then
+  echo "-- trying the FUSE view (/storage/emulated/$USER_ID) --"
+  if plant "/storage/emulated/$USER_ID"; then PLANTED_BASE="/storage/emulated/$USER_ID"; fi
+fi
+
+if [ -z "$PLANTED_BASE" ]; then
+  echo "!! could not plant fixtures by either route."
+  echo "   This is an environment limitation, not a product failure: without root, uid 2000"
+  echo "   cannot reach another user's emulated storage. Re-run with target: default (AOSP)."
+  adb shell id
+  adb shell ls -ld /storage/emulated/$USER_ID /data/media/$USER_ID 2>&1 || true
+  exit 1
+fi
+echo "planted under $PLANTED_BASE"
 
 log "confirm the app itself CANNOT read those bytes (the restriction is real)"
 # Run as the app's own uid in user 0 for a control: this is the failure mode the whole project
 # works around. Expected to fail; `|| true` keeps the script going.
-adb shell "run-as $APP_PKG ls '$DATA_DIR/planted' 2>&1 || true" | head -5 || true
+adb shell "run-as $APP_PKG ls '$PLANTED_BASE/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
 
 log "run the instrumented premise test as user $USER_ID"
 # --user is what puts the test process inside the secondary profile, so the app and the proxy

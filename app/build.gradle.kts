@@ -22,10 +22,29 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        // Test-only identity, shared with ProxyApkFactoryTest via the `understudy.testKeystore`
+        // system property. The proxy's provider is guarded by a `signature`-level permission, so
+        // the app and the generated proxy MUST share a signer or every bridge call fails with
+        // SecurityException on a real device. Falls back to the standard debug key when the
+        // keystore is absent, so a checkout without it still builds.
+        val testKeystore = rootProject.file("keystore/understudy-test.p12")
+        if (testKeystore.isFile) {
+            create("understudyTest") {
+                storeFile = testKeystore
+                storePassword = "understudy"
+                keyAlias = "understudy"
+                keyPassword = "understudy"
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             isMinifyEnabled = false
+            signingConfigs.findByName("understudyTest")?.let { signingConfig = it }
         }
         release {
             isMinifyEnabled = true
@@ -53,6 +72,17 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
+            // Lets ProxyApkFactoryTest sign the generated proxy with the same identity this
+            // module's debug build uses. Without it the two APKs differ in signer and the
+            // signature-level BRIDGE permission cannot be granted.
+            all {
+                it.systemProperty(
+                    "understudy.testKeystore",
+                    rootProject.file("keystore/understudy-test.p12").absolutePath,
+                )
+                it.systemProperty("understudy.testKeystorePassword", "understudy")
+                it.systemProperty("understudy.testKeystoreAlias", "understudy")
+            }
         }
     }
 }

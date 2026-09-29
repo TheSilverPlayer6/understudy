@@ -46,6 +46,36 @@ class ProxyApkFactoryTest {
     private fun outputDir(): File =
         File("build/outputs/proxy-test").apply { mkdirs() }
 
+    /**
+     * The signing identity used for the end-to-end artifact.
+     *
+     * When `understudy.testKeystore` is set (app/build.gradle.kts does this for unit tests) the
+     * generated proxy is signed with the *same* key as the app's debug build. That is not
+     * cosmetic: the proxy's provider is guarded by a `signature`-level permission, so on a real
+     * device a signer mismatch means every bridge call fails with SecurityException. CI installs
+     * both APKs into a secondary profile and runs BridgePremiseTest against them, so they must
+     * agree.
+     *
+     * Tests that only exercise signing *structure* still use a fresh random identity, which is
+     * the better test of the generator.
+     */
+    private fun sharedIdentity(): SigningIdentity {
+        val path = System.getProperty("understudy.testKeystore")
+        if (!path.isNullOrBlank()) {
+            val file = File(path)
+            if (file.isFile) {
+                return SigningIdentity.fromKeystore(
+                    pkcs12 = file.readBytes(),
+                    password = System.getProperty("understudy.testKeystorePassword", "understudy")
+                        .toCharArray(),
+                    alias = System.getProperty("understudy.testKeystoreAlias", "understudy"),
+                )
+            }
+            System.err.println("understudy.testKeystore=$path does not exist; using a random key")
+        }
+        return SigningIdentity.generate("Understudy Test")
+    }
+
     @Test
     fun `generates an installable proxy apk for an arbitrary package`() {
         val template = templateApk()
@@ -60,7 +90,7 @@ class ProxyApkFactoryTest {
             return
         }
 
-        val identity = SigningIdentity.generate("Understudy Test")
+        val identity = sharedIdentity()
         val factory = ProxyApkFactory(identity)
         val target = "com.example.targetgame"
         val proxy = factory.generate(template.readBytes(), target)
