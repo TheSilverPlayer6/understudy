@@ -95,6 +95,21 @@ jobs:
       - name: Unit tests
         run: ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest --rerun-tasks
 
+      # `check` rather than just `test`: it also runs lint and checkProxyTemplateFresh.
+      #
+      # Neither had ever run in CI, and both were hiding real defects. Lint found six NewApi
+      # errors — guaranteed crashes on supported devices, all in code paths no test executed
+      # (SigningInfo is API 28 against minSdk 26; setDontKillApp is API 34) — plus a missing
+      # REQUEST_DELETE_PACKAGES that would have made every data-preserving teardown throw
+      # SecurityException. checkProxyTemplateFresh catches the committed proxy template drifting
+      # from :proxy's sources, which otherwise surfaces at runtime on a user's device.
+      #
+      # Lint is slow (it is most of this step's time) but it is the only thing in the pipeline
+      # that knows the platform's API levels, and this project's whole risk profile is
+      # "correct on the JVM, wrong on a device".
+      - name: Lint and template freshness
+        run: ./gradlew --no-daemon --console=plain :app:check
+
       - name: Build every variant
         run: ./gradlew --no-daemon --console=plain :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
 
@@ -123,6 +138,8 @@ jobs:
           name: unit-test-results
           path: |
             app/build/reports/tests/
+            app/build/reports/lint-results-debug.txt
+            app/build/reports/lint-results-debug.html
             app/build/outputs/apk/
             app/build/outputs/proxy-test/
           if-no-files-found: warn
