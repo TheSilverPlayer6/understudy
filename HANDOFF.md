@@ -56,7 +56,7 @@ So there are two paths, and the app must tell the user which one they are on:
 gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
         :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  106 unit tests, 0 failures
+  112 unit tests, 0 failures
   app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~698 KB
 
 apksigner verify --verbose --print-certs <generated proxy>

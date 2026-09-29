@@ -169,20 +169,20 @@ No `apksigner`, no `zipalign`, no BouncyCastle at runtime.
 
 ## Testing
 
-106 JVM tests, all passing, plus an instrumented suite that runs on a real Android emulator in
+112 JVM tests, all passing, plus an instrumented suite that runs on a real Android emulator in
 CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE
 layer and no JVM test can reach it.
 
 
 | Suite | Covers |
 |---|---|
-| `BridgeIntegrationTest` (30) | **Robolectric.** Registers the *real* `ProxyFileBridge` from `:proxy-core` and drives it with the *real* `BridgeClient` through a real `ContentResolver`: identity handshake, cursor schema, streaming both ways, truncate vs append, mkdirs/delete/rename/statTree/statPath, wipe, launcher hiding, and path-safety from both sides — including a hand-crafted traversal URI that bypasses the client. Also asserts both roots end in the package name (see below), and that the two copies of `BridgeContract` agree on every constant that crosses the process boundary. |
+| `BridgeIntegrationTest` (31) | **Robolectric.** Registers the *real* `ProxyFileBridge` from `:proxy-core` and drives it with the *real* `BridgeClient` through a real `ContentResolver`: identity handshake, cursor schema, streaming both ways, truncate vs append, mkdirs/delete/rename/statTree/statPath, wipe, launcher hiding, and path-safety from both sides — including a hand-crafted traversal URI that bypasses the client. Also asserts both roots end in the package name (see below), and that the two copies of `BridgeContract` agree on every constant that crosses the process boundary. |
 | `SessionManagerTest` (34) | **Robolectric.** The transition guards the app's safety rests on, against the real `ProxyFileBridge`, real `ProxyInstaller` (on Robolectric's `PackageInstaller` shadow) and real `ApkGenerator`. Mostly about *refusals*: `DESTROY_DATA` without confirmation never even asks the system to uninstall; a failed wipe or shell command sets `dataAtRisk` instead of proceeding; a recorded pull for one package does not unlock evacuation of another; a dead bridge is not treated as a successful wipe. |
-| `ShellCommandsTest` (12) | The runbook's **ordering** — data moved aside before anything can delete it — plus per-user paths, idempotence guards, quoting, that the destructive form carries no `-k`, and that ownership repair targets the *per-user* uid via `pm list packages -U` rather than dumpsys. |
+| `ShellCommandsTest` (14) | The runbook's **ordering** — data moved aside before anything can delete it — plus per-user paths, idempotence guards, quoting, that the destructive form carries no `-k`, that ownership repair targets the *per-user* uid via `pm list packages -U` rather than dumpsys, and that every command an operator is given runs against the raw lower filesystem (a plain shell is refused the FUSE view of another user, so a runbook written against it fails on every line). |
 | `TransferModelTest` (11) | Progress arithmetic, clamping, empty-transfer edge cases, and the success predicate that must not report success on a partial copy. |
 | `ManifestPatcherTest` (10) | Parses the **real AGP-produced manifest** committed as a fixture. Asserts a no-op re-encode is byte-identical, that only the bare package string is rewritten, that the permission is preserved, that the chunk chain still lands exactly on EOF, and that invalid package names are rejected. |
 | `V2SignerStructureTest` (6) | Re-parses our own signer block with an independent reader mirroring apksig's field order; verifies the signature over exactly the embedded `signedData`; checks the signing-block framing and the `0xa5`/`0x5a` chunked-digest rules. |
-| `ProxyApkFactoryTest` (3) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, and that two targets differ only in identity. Writes a sample APK for external verification. |
+| `ProxyApkFactoryTest` (6) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, that two targets differ only in identity, and that the generator's certificate digest is baked in at the path the proxy reads **and covered by the v1 signature**. Writes a sample APK for external verification. |
 
 On a real emulator (API 34 and 35, KVM, `target: default` so `adb root` works),
 `BridgePremiseTest` creates a secondary user, installs the runtime-generated proxy and this app
