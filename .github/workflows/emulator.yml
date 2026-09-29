@@ -60,10 +60,23 @@ jobs:
           { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
           export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
 
-          "$SDKMANAGER" --list_installed || true
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
-          "$SDKMANAGER" --list_installed
+          # The runner's SDK directory is root-owned, so installing as the `runner` user fails
+          # at "Computing updates" with exit 1 and no diagnostic. Prefer a user-writable SDK and
+          # fall back to sudo, printing the reason either way.
+          if [ -w "$ANDROID_HOME" ]; then
+            SUDO=""
+            echo "SDK dir is writable by $(id -un); installing without sudo"
+          else
+            SUDO="sudo -E"
+            echo "SDK dir $ANDROID_HOME is NOT writable by $(id -un); using sudo"
+            ls -ld "$ANDROID_HOME"
+          fi
+          yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "platforms;android-37" "build-tools;37.0.0" 2>&1 | tail -25
+          $SUDO "$SDKMANAGER" --list_installed
+          # sudo-installed files can end up root-owned, which then breaks Gradle's own SDK
+          # writes; hand them back to the runner user.
+          [ -n "$SUDO" ] && sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME" || true
 
       # The wrapper's distributionUrl points at a GitHub mirror because the reference build
       # sandbox blocks services.gradle.org. That mirror is reachable from here too.
@@ -125,8 +138,10 @@ jobs:
           BT="$ANDROID_HOME/build-tools/37.0.0"
           { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
           export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          if [ -w "$ANDROID_HOME" ]; then SUDO=""; else SUDO="sudo -E"; fi
+          yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "platforms;android-37" "build-tools;37.0.0" 2>&1 | tail -25
+          [ -n "$SUDO" ] && sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME" || true
 
       # GitHub-hosted Linux runners expose /dev/kvm, but the udev rules leave it root-only.
       # Without this the emulator falls back to software emulation and times out.
