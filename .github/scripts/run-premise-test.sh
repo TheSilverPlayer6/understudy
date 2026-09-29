@@ -137,6 +137,23 @@ log "confirm the app itself CANNOT read those bytes (the restriction is real)"
 # works around. Expected to fail; `|| true` keeps the script going.
 adb shell "run-as $APP_PKG ls '$PLANTED_BASE/Android/data/$TARGET_PKG/planted' 2>&1 || true" | head -5 || true
 
+log "clear logcat and start capturing"
+adb logcat -c 2>/dev/null || true
+adb logcat -v time > premise-logs/logcat.log 2>&1 &
+LOGCAT_PID=$!
+sleep 1
+
+log "probe the provider directly from the shell (bypasses our client)"
+# `content query` exercises the same provider through the platform, so if this also returns
+# nothing the problem is in the proxy; if it works, the problem is in our client or in how the
+# app resolves the authority.
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -20 || true
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data/planted" 2>&1 | head -20 || true
+echo "-- call ping --"
+adb shell content call --user "$USER_ID" --uri "content://$TARGET_PKG" --method ping 2>&1 | head -20 || true
+echo "-- what the proxy actually sees on disk --"
+adb shell ls -laR "/data/media/$USER_ID/Android/data/$TARGET_PKG" 2>&1 | head -30 || true
+
 log "run the instrumented premise test as user $USER_ID"
 # --user is what puts the test process inside the secondary profile, so the app and the proxy
 # share a uid space and the signature-level permission grant applies.
@@ -151,6 +168,13 @@ INSTRUMENT_EXIT="${PIPESTATUS[0]}"
 set -e
 
 log "instrument exit=$INSTRUMENT_EXIT"
+sleep 2
+kill "$LOGCAT_PID" 2>/dev/null || true
+wait "$LOGCAT_PID" 2>/dev/null || true
+
+log "proxy-side logcat (bridge, provider, crashes)"
+grep -iE "UnderstudyBridge|ProxyFileBridge|AndroidRuntime|FATAL|ActivityManager.*$TARGET_PKG|ContentProvider|SecurityException|FileNotFound" \
+  premise-logs/logcat.log | head -60 || echo "(no matching logcat lines)"
 # `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
 if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then
   echo "!! instrumented tests reported failures"
