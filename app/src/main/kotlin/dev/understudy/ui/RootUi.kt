@@ -506,17 +506,65 @@ private fun TransferPanel(viewModel: MainViewModel) {
     val result by viewModel.lastResult.collectAsStateWithLifecycle()
     val destination by viewModel.destination.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val path by viewModel.path.collectAsStateWithLifecycle()
+    val pushNotice by viewModel.pushNotice.collectAsStateWithLifecycle()
+    val pushSkipped by viewModel.pushSkipped.collectAsStateWithLifecycle()
 
     if (state !is SessionState.Ready) return
+
+    val busy = progress?.isRunning == true
 
     HorizontalDivider()
     Text("Transfer", style = MaterialTheme.typography.titleSmall)
 
     Button(
         onClick = viewModel::pullCurrentTree,
-        enabled = destination != null && progress?.isRunning != true,
+        enabled = destination != null && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text(if (destination == null) "Choose a destination first" else "Pull everything to destination") }
+
+    // The other half of the round trip: without a push, a backup can be taken but never
+    // restored, and restoring is the reason anyone wants this app. Same engine, same
+    // progress and cancellation handling as the pull above.
+    OutlinedButton(
+        onClick = viewModel::pushCurrentTree,
+        enabled = destination != null && !busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            when {
+                destination == null -> "Choose a source folder first"
+                path.isEmpty() -> "Push the folder into the proxy's data root"
+                else -> "Push the folder into $path"
+            },
+        )
+    }
+    Text(
+        "Push copies the folder you chose above INTO the proxy's private storage, at the path " +
+            "the Files tab is currently showing. Files that already exist there are overwritten.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    if (pushNotice != null) {
+        Text(
+            pushNotice!!,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    if (pushSkipped.isNotEmpty()) {
+        Text(
+            "${pushSkipped.size} skipped (cannot exist inside Android/data):",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        pushSkipped.take(8).forEach { (name, reason) ->
+            Text("  $name — $reason", style = MonoTypography, maxLines = 2)
+        }
+        if (pushSkipped.size > 8) {
+            Text("  …and ${pushSkipped.size - 8} more", style = MonoTypography)
+        }
+    }
 
     if (progress != null) {
         val p = progress!!

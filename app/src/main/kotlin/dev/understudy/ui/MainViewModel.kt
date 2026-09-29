@@ -230,6 +230,74 @@ class MainViewModel(private val application: Application) : ViewModel() {
         }
     }
 
+    /**
+     * Copies the chosen local directory *into* the proxy's current path.
+     *
+     * The mirror of [pullCurrentTree], and the half that makes a restore possible: pull gets the
+     * saves out, push puts them back. Both directions go through the same [TransferEngine], so
+     * the streaming, cancellation and per-file failure reporting behave identically.
+     *
+     * Two differences from pull are deliberate:
+     *
+     *  - The source tree is walked *before* anything is copied, so a file that cannot be
+     *    represented inside `Android/data/<pkg>` is reported up front instead of failing
+     *    halfway through a multi-gigabyte transfer.
+     *  - A push never records a verified pull. [dev.understudy.core.SessionManager] unlocks
+     *    evacuate-then-uninstall only on the strength of a completed *pull*, because that is
+     *    the direction which proves a copy of the data exists somewhere else. Pushing data in
+     *    proves no such thing, and treating it as equivalent would let a teardown delete the
+     *    only copy.
+     */
+    fun pushCurrentTree() {
+        val bridge = sessions.bridge()
+        val destUri = _destination.value?.uri
+        if (bridge == null || destUri == null) return
+
+        val saf = SafDestination.restore(application, destUri) ?: return
+        _lastResult.value = null
+
+        transferJob = viewModelScope.launch {
+            val skipped = ArrayList<Pair<String, String>>()
+            val sources = withContext(Dispatchers.IO) {
+                saf.collectSourcesForPush(_path.value.ifEmpty { "" }) { path, reason ->
+                    skipped += path to reason
+                }
+            }
+            _pushSkipped.value = skipped
+            if (sources.isEmpty()) {
+                // Not _browseError: that channel reports failures to READ the proxy's tree, and
+                // mixing a push outcome into it would make the Files tab show an error for a
+                // browse that succeeded.
+                _pushNotice.value = if (skipped.isEmpty()) {
+                    "Nothing to push: the selected folder is empty."
+                } else {
+                    "Nothing to push: ${skipped.size} " +
+                        (if (skipped.size == 1) "entry" else "entries") +
+                        " cannot be represented inside the proxy's storage."
+                }
+                return@launch
+            }
+            _pushNotice.value = null
+
+            val transfer = TransferEngine(bridge, saf)
+            engine = transfer
+            val result = withContext(Dispatchers.IO) {
+                transfer.push(_root.value, sources) { p -> _progress.value = p }
+            }
+            _lastResult.value = result
+            // Refresh so the user sees what landed, rather than a listing from before the push.
+            refreshListing()
+        }
+    }
+
+    private val _pushSkipped = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    /** Entries the source tree contained that cannot be pushed, with the reason for each. */
+    val pushSkipped: StateFlow<List<Pair<String, String>>> = _pushSkipped.asStateFlow()
+
+    private val _pushNotice = MutableStateFlow<String?>(null)
+    /** Why a push did not start, when it did not. Null once one is under way. */
+    val pushNotice: StateFlow<String?> = _pushNotice.asStateFlow()
+
     fun cancelTransfer() {
         engine?.cancel()
     }
@@ -256,6 +324,8 @@ class MainViewModel(private val application: Application) : ViewModel() {
         engine = null
         _progress.value = null
         _lastResult.value = null
+        _pushSkipped.value = emptyList()
+        _pushNotice.value = null
         _entries.value = emptyList()
         _path.value = ""
         _stat.value = null

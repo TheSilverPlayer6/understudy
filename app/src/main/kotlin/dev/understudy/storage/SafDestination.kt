@@ -140,6 +140,89 @@ class SafDestination private constructor(
         return true
     }
 
+    /**
+     * Walks a subdirectory of the chosen tree and returns one [dev.understudy.transfer.PushSource]
+     * per file, with paths relative to [relativePath].
+     *
+     * This is the read side of a push: the engine wants "path → how to open its bytes", and only
+     * a SAF tree walk can produce that. Keeping the traversal here (rather than in the ViewModel
+     * or the engine) means [dev.understudy.transfer.TransferEngine] stays free of DocumentFile
+     * and therefore unit-testable, which is why it takes a lambda in the first place.
+     *
+     * Names are validated on the way *in* as well as out: the tree belongs to the user and may
+     * live on an SD card formatted by anything, so a name the proxy could not represent is
+     * skipped with a reason rather than being pushed and failing halfway through a 4 GB file.
+     *
+     * @param onSkip called for each entry that cannot be represented, so the UI can say so
+     */
+    fun collectSourcesForPush(
+        relativePath: String = "",
+        onSkip: (String, String) -> Unit = { _, _ -> },
+    ): List<dev.understudy.transfer.PushSource> {
+        val segments = splitAndValidate(relativePath)
+        var current: DocumentFile = root
+        for (segment in segments) {
+            current = current.findFile(segment)
+                ?: return emptyList() // nothing to push from a directory that is not there
+            if (!current.isDirectory) return emptyList()
+        }
+
+        val out = ArrayList<dev.understudy.transfer.PushSource>()
+        walkForPush(current, "", out, onSkip)
+        return out
+    }
+
+    private fun walkForPush(
+        dir: DocumentFile,
+        prefix: String,
+        out: MutableList<dev.understudy.transfer.PushSource>,
+        onSkip: (String, String) -> Unit,
+    ) {
+        for (child in dir.listFiles()) {
+            val name = child.name
+            if (name == null) {
+                onSkip(prefix, "unnamed entry")
+                continue
+            }
+            val relative = if (prefix.isEmpty()) name else "$prefix/$name"
+            if (!isRepresentable(name)) {
+                onSkip(relative, "name cannot be represented inside the proxy's storage")
+                continue
+            }
+            if (child.isDirectory) {
+                walkForPush(child, relative, out, onSkip)
+                continue
+            }
+            val size = child.length()
+            val uri = child.uri
+            // Resolve the opener against the URI, not the DocumentFile: holding the tree open
+            // for the duration of a multi-gigabyte push is what leaks file descriptors.
+            out += dev.understudy.transfer.PushSource(relative, size) {
+                context.contentResolver.openInputStream(uri)
+                    ?: throw java.io.FileNotFoundException("cannot open $uri")
+            }
+        }
+    }
+
+    /**
+     * Whether [name] can exist as an entry inside `Android/data/<pkg>`.
+     *
+     * Deliberately stricter than the SAF side: these names become real paths on the proxy's
+     * filesystem, where a leading `~`, a control character, or a `.` / `..` entry would either
+     * be rejected or — worse — resolve somewhere unintended. The proxy validates too, but
+     * failing here means the user learns before the transfer rather than during it.
+     */
+    private fun isRepresentable(name: String): Boolean {
+        if (name.isEmpty() || name == "." || name == "..") return false
+        if (name.contains('\u0000')) return false
+        if (name.any { it.code < 0x20 || it.code == 0x7f }) return false
+        // The bridge rejects backslashes outright; some filesystems accept them and would
+        // create a name that the proxy can never address again.
+        if (name.contains('\\')) return false
+        if (name == ".nomedia") return false
+        return true
+    }
+
     private fun splitAndValidate(relativePath: String): List<String> {
         if (relativePath.isEmpty()) return emptyList()
         require(!relativePath.startsWith("/")) { "path must be relative: $relativePath" }
