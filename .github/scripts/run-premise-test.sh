@@ -447,6 +447,7 @@ await_user_running "$USER_ID" || exit 1
 await_framework "after start-user" || exit 1
 adb shell pm list users 2>&1 || true
 
+
 # INSTALL ORDER IS DELIBERATE, and it matches production rather than being convenient.
 #
 # The app goes in FIRST, because on a real device the app is what generates and installs the
@@ -537,6 +538,43 @@ adb shell dumpsys package queries 2>&1 | grep -A6 -E "$APP_PKG|$TARGET_PKG|$PROD
 echo "-- does the discovery action resolve? (this is what <queries><intent> buys) --"
 adb shell cmd package query-receivers --components -a dev.understudy.action.PROXY_DISCOVERY 2>&1 \
   | head -20 | tee premise-logs/discovery-query.log || true
+
+log "storage + component state of user $USER_ID (diagnostic, all levels)"
+# The API 37 premise failure (runs #45-#50) lives in this layer and nowhere else: user N's
+# emulated storage reports "Transport endpoint is not connected" (the FUSE mount exists, its
+# daemon does not), the user's flags stay 0x400 without the 0x010 INITIALIZED bit every
+# working level shows, and then — everything downstream of a user whose CE storage never
+# unlocked: the proxy's provider does not resolve even from ROOT (`content query` -> "Could not
+# find provider", which is NOT a visibility filter, because root bypasses those), discovery
+# returns [], and the instrumented suite reports ProxyUnreachable while getPackageInfo
+# succeeds. One broken layer, three symptoms — OR a second, independent API 37 change:
+# provider resolution excluding freshly installed (stopped) packages, which the explicit
+# activity launch below discriminates between. These lines capture the platform's own account
+# on every level, so the healthy ones serve as the control for the sick one. Informational:
+# no command here may change any verdict (every one is best-effort), and the discriminator
+# ends by force-stopping the proxy, so the suite still faces the exact cold state it would
+# have faced without this block.
+echo "-- user state --"
+adb shell "dumpsys user 2>/dev/null | grep -E 'UserInfo\{$USER_ID|State|running|initialized|unlocked' | head -12" 2>&1 || true
+echo "-- volumes + mounts --"
+adb shell sm list-volumes 2>&1 | head -8 || true
+adb shell "mount 2>/dev/null | grep -E '/storage/emulated|/mnt/pass_through/$USER_ID|/mnt/runtime/[a-z]*/emulated/$USER_ID' | head -10" 2>&1 || true
+echo "-- MediaProvider (the FUSE host process) --"
+adb shell "pidof com.google.android.providers.media.module" 2>&1 || echo "  (media module process not running)"
+adb shell "logcat -d -v time MediaProvider:V FuseDaemon:V vold:W StorageManagerService:W *:S 2>/dev/null | tail -30" 2>&1 || true
+echo "-- can the platform resolve the proxy's provider? (BEFORE any launch: cold, stopped state) --"
+adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -6" || true
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
+echo "-- stopped-state discriminator: launch the proxy's own exported activity, then re-resolve --"
+adb shell "am start --user $USER_ID -n $TARGET_PKG/dev.understudy.proxytpl.ProxyStatusActivity" 2>&1 | head -5 || true
+sleep 3
+adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -6" || true
+adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
+echo "-- and after force-stop (re-arms the stopped flag): does resolution die again? --"
+adb shell "am force-stop --user $USER_ID $TARGET_PKG" 2>&1 || true
+sleep 1
+adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -4" || true
+echo "-- (end of storage diagnostics) --"
 
 log "plant known bytes in the proxy's private storage"
 # These directories do not exist yet, and that is the point: the proxy must be able to see data
