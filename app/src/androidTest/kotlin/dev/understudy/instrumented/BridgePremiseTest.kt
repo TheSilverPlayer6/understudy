@@ -265,6 +265,14 @@ class BridgePremiseTest {
         val path = "$PLANTED_DIR/written-by-test.txt"
         val payload = "written from user ${myUserId()} at ${System.currentTimeMillis()}"
 
+        if (!expectPlanted) {
+            // No root in this run, so nothing pre-created the directory, and `openFile` refuses a
+            // write whose parent is missing. Create it through the bridge: what this test proves is
+            // that a write reaches the real filesystem, not that the directory pre-existed — that
+            // is what the two `planted*` tests are for, and they are the ones that need root.
+            client().mkdirs(StorageRoot.DATA, PLANTED_DIR)
+        }
+
         client().openFile(StorageRoot.DATA, path, "w").use { pfd ->
             android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd).use {
                 it.write(payload.toByteArray())

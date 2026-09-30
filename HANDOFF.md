@@ -143,15 +143,27 @@ caller-authentication path. In rough priority order, what is actually left:
    runbook the backend would drive needs root, and self-paired wireless ADB lands in uid 2000.
    That has to be reconciled before the backend is worth writing.
 3. **OEM testing** — MIUI/HyperOS, ColorOS, One UI. Everything verified so far is AOSP
-   `target: default` on API 34/35 emulators.
+   `target: default` on API 34/35 plus `google_apis` on 36. The `<queries><intent>` discovery
+   mechanism is the part most worth confirming on OEM builds, since it is what makes the bridge
+   reachable at all.
 4. **The installer UX on a device.** CI installs with `adb install --user`; the
    `PackageInstaller` session path, `STATUS_PENDING_USER_ACTION` and the per-profile
    `REQUEST_INSTALL_PACKAGES` grant flow are unexercised.
 5. **SAF writes** to a user-picked tree, grant persistence across reboot, and the
    `hasFragileUserData` "Keep app data" checkbox on a current build.
 6. **Recovery from process death** mid-transfer.
-7. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
-8. **Debug and release builds cannot coexist on one device.** Both define
+7. **API 37 itself, and the rooted jobs stop at 35.** There is no AOSP `target: default` system
+   image above API 35 — `sdkmanager --list` offers `google_apis`, `google_apis_playstore` and
+   `google_atd` for 36/37 and nothing else — and `google_apis` is production-signed, so
+   `adb root` is refused. Root is not a convenience: planting fixture bytes into a *secondary*
+   user's private storage needs uid 0. So API 36 runs a **reduced** job (`ALLOW_NO_ROOT=1`) that
+   proves everything except the two claims needing root-planted bytes, and prints
+   `PREMISE VERIFIED (REDUCED, no root)` rather than pretending otherwise. API 37 has no image the
+   emulator-runner action can address at all (it builds `system-images;android-37;…`; the real ids
+   are `android-37.0` / `android-37.1`). The rooted jobs run with `ALLOW_NO_ROOT=0` so that losing
+   root fails loudly — run #30 is what a silent degradation looks like.
+8. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
+9. **Debug and release builds cannot coexist on one device.** Both define
    `dev.understudy.permission.BRIDGE`, so the second install fails with
    `INSTALL_FAILED_DUPLICATE_PERMISSION`. Same for upgrading over a build that left an *old* proxy
    installed — those still define the permission themselves. `InstallResultReceiver.describe` now

@@ -15,6 +15,16 @@ TARGET_PKG="${TARGET_PKG:-com.example.targetgame}"
 # PRODSIGN_PKG with a fresh random key carrying the app's certificate digest (production path).
 PRODSIGN_PKG="${PRODSIGN_PKG:-com.example.prodgame}"
 APP_PKG="${APP_PKG:-dev.understudy.debug}"
+# Whether the run may proceed WITHOUT root, in a reduced mode that proves less. Default 0: the
+# API 34/35 jobs must fail loudly if they lose root, because that is a real regression (run #30)
+# and a silently reduced suite would look identical to a passing one.
+#
+# Set to 1 only for images where root is impossible. There is no AOSP (`target: default`) system
+# image for API 36 or 37 — `sdkmanager --list` offers google_apis, google_apis_playstore and
+# google_atd, and nothing else — and google_apis is production-signed, so `adb root` is refused.
+# Since the project targets API 37, verifying nothing above 35 is worse than verifying a clearly
+# labelled subset of it. See the banner below for exactly what the subset is.
+ALLOW_NO_ROOT="${ALLOW_NO_ROOT:-0}"
 TEST_RUNNER="${TEST_RUNNER:-androidx.test.runner.AndroidJUnitRunner}"
 USER_NAME="understudy-ci"
 
@@ -71,17 +81,47 @@ for attempt in 1 2 3 4 5 6; do
   fi
   sleep 5
 done
+EXPECT_PLANTED=true
 if [ "$HAVE_ROOT" != "1" ]; then
   echo "!! could not obtain root after 6 attempts."
-  echo "   Either the image is production-signed (it should not be — the workflow pins"
-  echo "   target: default) or the emulator never settled. Planting fixture bytes into another"
-  echo "   user's private storage needs uid 0: uid 2000 is exempt from the FUSE filter only"
-  echo "   within its own mount namespace, and even root is refused the FUSE view of another"
-  echo "   user (run #11), so /data/media/$USER_ID is the only route."
   adb shell getprop ro.build.type
   adb shell getprop ro.build.tags
   adb shell getprop ro.debuggable
   adb shell id
+  if [ "$ALLOW_NO_ROOT" != "1" ]; then
+    echo "!! refusing to continue. Planting fixture bytes into another user's private storage"
+    echo "   needs uid 0: uid 2000 is exempt from the FUSE filter only within its own mount"
+    echo "   namespace, and even root is refused the FUSE view of another user (run #11), so"
+    echo "   /data/media/$USER_ID is the only route. This job pins target: default, so a"
+    echo "   failure here is an emulator that never settled, not a missing feature."
+    exit 1
+  fi
+  EXPECT_PLANTED=false
+  cat <<'BANNER'
+--------------------------------------------------------------------------------------------
+RUNNING IN REDUCED MODE: no root, so nothing was planted and nothing can be checked on the
+raw filesystem. Set ALLOW_NO_ROOT=1 for this job, which means the image cannot be rooted.
+
+STILL PROVEN here, all of it from inside a real secondary profile:
+  * a runtime-generated proxy installs for user N and answers across Binder, so the
+    signature-level BRIDGE permission really is granted between two separately built APKs;
+  * the proxy runs in the intended profile, and reports its own two roots;
+  * bytes written THROUGH THE BRIDGE land on the real filesystem, confirmed by the proxy's own
+    statPath — the caller cannot check for itself, which is the point;
+  * the platform still hides that storage from every other package, so none of the above can
+    pass vacuously;
+  * two proxies coexist for one user (neither defines BRIDGE);
+  * the app reaches a proxy signed with a DIFFERENT key via the generator-certificate digest;
+  * traversal is rejected, and a forged authority reads nobody;
+  * <queries><intent> discovery resolves the proxies without QUERY_ALL_PACKAGES.
+
+NOT PROVEN here, and still only proven on the rooted API 34/35 jobs:
+  * that the proxy can read data that PRE-DATES it — the backup/restore case, which needs
+    fixture bytes planted by root into /data/media/<user>;
+  * that `pm uninstall -k` preserves Android/data afterwards, which can only be checked on the
+    raw path.
+--------------------------------------------------------------------------------------------
+BANNER
 fi
 # RAW_BASE is computed after the user exists; see the planting step.
 
@@ -285,14 +325,16 @@ if [ -z "$PLANTED_BASE" ]; then
 fi
 
 if [ -z "$PLANTED_BASE" ]; then
-  echo "!! could not plant fixtures by either route."
-  echo "   This is an environment limitation, not a product failure: without root, uid 2000"
-  echo "   cannot reach another user's emulated storage. Re-run with target: default (AOSP)."
-  adb shell id
-  adb shell ls -ld /storage/emulated/$USER_ID /data/media/$USER_ID 2>&1 || true
-  exit 1
+  if [ "$HAVE_ROOT" = "1" ]; then
+    echo "!! had root and still could not plant fixtures by either route — that is a real"
+    echo "   failure, not an environment limitation."
+    adb shell id
+    adb shell ls -ld /storage/emulated/$USER_ID /data/media/$USER_ID 2>&1 || true
+    exit 1
+  fi
+  echo "-- no root, so nothing was planted; the two planted* tests will skip themselves --"
 fi
-echo "planted under $PLANTED_BASE"
+if [ -n "$PLANTED_BASE" ]; then echo "planted under $PLANTED_BASE"; fi
 
 log "confirm the app itself CANNOT read those bytes (the restriction is real)"
 # Run as the app's own uid inside user 10 for a control: this is the failure mode the whole
@@ -429,7 +471,7 @@ set +e
 adb shell am instrument -w --user "$USER_ID" \
   -e targetPackage "$TARGET_PKG" \
   -e userId "$USER_ID" \
-  -e expectPlanted true \
+  -e expectPlanted "$EXPECT_PLANTED" \
   -e class dev.understudy.instrumented.BridgePremiseTest \
   "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/instrument.log
 INSTRUMENT_EXIT="${PIPESTATUS[0]}"
@@ -558,24 +600,40 @@ log "teardown: uninstall the proxy KEEPING its data"
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave
 # Android/data behind, which is what the app's teardown strategy depends on.
 adb shell pm uninstall -k --user "$USER_ID" "$TARGET_PKG" 2>&1 || true
-# Verify on the RAW path: root gets EACCES on the FUSE view of another user (run #11 proved
-# it), so checking $DATA_DIR here would report a false "-k did not preserve it".
-adb shell "ls -la '$RAW_DATA' 2>&1 || echo '  (data dir gone — -k did NOT preserve it!)'" \
-  | tee premise-logs/after-uninstall.log
+if [ "$HAVE_ROOT" = "1" ]; then
+  # Verify on the RAW path: root gets EACCES on the FUSE view of another user (run #11 proved
+  # it), so checking $DATA_DIR here would report a false "-k did not preserve it".
+  adb shell "ls -la '$RAW_DATA' 2>&1 || echo '  (data dir gone — -k did NOT preserve it!)'" \
+    | tee premise-logs/after-uninstall.log
 
-if adb shell "[ -d '$RAW_DATA/planted' ]" 2>/dev/null; then
-  echo "OK: 'pm uninstall -k' preserved the data directory"
-  adb shell "ls -lan '$RAW_DATA/planted'; cat '$RAW_DATA/planted/save.dat'; echo" || true
+  if adb shell "[ -d '$RAW_DATA/planted' ]" 2>/dev/null; then
+    echo "OK: 'pm uninstall -k' preserved the data directory"
+    adb shell "ls -lan '$RAW_DATA/planted'; cat '$RAW_DATA/planted/save.dat'; echo" || true
+  else
+    echo "!! 'pm uninstall -k' did NOT preserve $RAW_DATA/planted"
+    exit 1
+  fi
 else
-  echo "!! 'pm uninstall -k' did NOT preserve $RAW_DATA/planted"
-  exit 1
+  echo "-- NOT asserting that -k preserved the data: the only place to look is $RAW_DATA,"
+  echo "   which needs root, and the proxy that could have answered for it is now uninstalled."
+  echo "   Claiming it was preserved here would be exactly the kind of unfalsifiable pass"
+  echo "   this suite exists to avoid. The rooted API 34/35 jobs assert it."
 fi
 
 log "remove the test user"
 adb shell pm remove-user "$USER_ID" 2>&1 || true
 
 echo
-echo "PREMISE VERIFIED on API $API: a proxy installed for user $USER_ID could read and write"
-echo "  $DATA_DIR"
-echo "  $OBB_DIR"
-echo "and 'pm uninstall -k' preserved the data afterwards."
+if [ "$EXPECT_PLANTED" = "true" ]; then
+  echo "PREMISE VERIFIED on API $API: a proxy installed for user $USER_ID could read and write"
+  echo "  $DATA_DIR"
+  echo "  $OBB_DIR"
+  echo "including data that pre-dated the proxy, and 'pm uninstall -k' preserved it afterwards."
+else
+  echo "PREMISE VERIFIED (REDUCED, no root) on API $API: a proxy installed for user $USER_ID"
+  echo "could read and write"
+  echo "  $DATA_DIR"
+  echo "  $OBB_DIR"
+  echo "NOT verified here: reading data that pre-dates the proxy, and -k preservation."
+  echo "Both need root and remain covered by the rooted API 34/35 jobs."
+fi

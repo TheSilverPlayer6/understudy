@@ -146,16 +146,40 @@ jobs:
           retention-days: 14
 
   premise:
-    name: FUSE premise (API ${{ matrix.api-level }})
+    name: FUSE premise (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: jvm
     strategy:
       fail-fast: false
       matrix:
-        # Both are far above API 30, where the FUSE restriction landed. Anything older would
-        # pass for the wrong reason. 34 is a widely-deployed baseline; 35 is current.
-        api-level: [34, 35]
+        # 34 and 35 are far above API 30, where the FUSE restriction landed — anything older
+        # would pass for the wrong reason. Both use `target: default` (AOSP), because planting
+        # fixture bytes into a *secondary* user's private storage needs `adb root` and
+        # google_apis images are production-signed and refuse it.
+        #
+        # 36 is a REDUCED run and the reason is not laziness: there is no AOSP `default` system
+        # image for API 36 or 37 at all. `sdkmanager --list` offers google_apis,
+        # google_apis_playstore and google_atd for those levels and nothing else, so root is
+        # impossible and the fixtures cannot be planted. Since the project targets API 37,
+        # verifying nothing above 35 is worse than verifying a clearly labelled subset of it —
+        # the script prints exactly what is and is not proven, and the final line says
+        # "PREMISE VERIFIED (REDUCED, no root)". What is lost is the two claims that need bytes
+        # planted by root: reading data that pre-dates the proxy, and `pm uninstall -k`
+        # preservation. Both stay covered by the rooted jobs.
+        include:
+          - api-level: 34
+            target: default
+            label: API 34, AOSP, rooted
+            allow-no-root: 0
+          - api-level: 35
+            target: default
+            label: API 35, AOSP, rooted
+            allow-no-root: 0
+          - api-level: 36
+            target: google_apis
+            label: API 36, google_apis, no root
+            allow-no-root: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -236,19 +260,24 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
-          # `default` (AOSP) rather than google_apis, because the test needs `adb root`.
-          # Planting fixture bytes into a *secondary* user's private storage requires uid 0:
-          # uid 2000 is exempt from the FUSE filter only inside its own mount namespace, so
-          # /storage/emulated/10 is not reachable from the default shell — and google_apis images
-          # are production-signed, so `adb root` is refused. This is also more faithful: the raw
-          # /data/media/<user> path we write to is exactly where the rename-aside trick operates.
-          target: default
+          # `default` (AOSP) wherever one exists, because the test needs `adb root`: planting
+          # fixture bytes into a *secondary* user's private storage requires uid 0, since uid 2000
+          # is exempt from the FUSE filter only inside its own mount namespace and so cannot reach
+          # /storage/emulated/10 at all. Root is also more faithful — the raw /data/media/<user>
+          # path we write to is exactly where the rename-aside trick operates. API 36+ has no
+          # `default` image, hence google_apis and the reduced mode; see the matrix comment.
+          target: ${{ matrix.target }}
           arch: x86_64
           # No snapshot: a restored one could carry a user profile or an install over from a
           # previous attempt and make a failing step look like it succeeded.
           disable-animations: true
           emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
+        env:
+          # 0 for the rooted jobs, so losing root fails the run loudly instead of silently
+          # degrading to a reduced suite that still reports success. That is exactly what
+          # happened in run #30, and the retry loop only helps if the failure is visible.
+          ALLOW_NO_ROOT: ${{ matrix.allow-no-root }}
 
       - uses: actions/upload-artifact@v4
         if: always()

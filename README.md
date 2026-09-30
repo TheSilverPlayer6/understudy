@@ -204,9 +204,9 @@ reach either.
 | `BridgeErrorTest` (8) | The two failure messages a user has to act on. Both were wrong before milestone 5 in the most expensive way — confidently naming a cause that could not be the one — and on a user's device the string *is* the diagnosis, since there is no logcat to attach. |
 | `ProxyApkFactoryTest` (6) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, that two targets differ only in identity, and that the generator's certificate digest is baked in at the path the proxy reads **and covered by the v1 signature**. Writes a sample APK for external verification. |
 
-On a real emulator (API 34 and 35, KVM, `target: default` so `adb root` works),
-`BridgePremiseTest` creates a secondary user, installs the runtime-generated proxy and this app
-into it, plants known bytes as root, and asserts the premise:
+On real emulators (KVM, three jobs — see below), `BridgePremiseTest` creates a secondary user,
+installs the runtime-generated proxy and this app into it, plants known bytes as root, and asserts
+the premise:
 
 * the proxy is reachable across the process boundary, so the `signature`-level BRIDGE permission
   really is granted between two separately built APKs;
@@ -241,8 +241,10 @@ keytool -printcert                         →  parses our hand-built PKCS#7
 ### Not covered
 
 * **OEM behaviour.** Everything verified so far is AOSP `target: default` on API 34 and 35
-  emulators. MIUI/HyperOS, ColorOS and One UI each add installer guards, background-kill rules
-  and wireless-debugging timeouts of their own, and none of it has been exercised.
+  emulators plus `google_apis` on 36. MIUI/HyperOS, ColorOS and One UI each add installer guards,
+  background-kill rules and wireless-debugging timeouts of their own, and none of it has been
+  exercised. The `<queries><intent>` discovery mechanism in particular is worth confirming on OEM
+  builds, since it is what makes the bridge reachable at all.
 * **The installer UX from inside the app.** CI installs with `adb install --user`; the
   `PackageInstaller` session path, the `STATUS_PENDING_USER_ACTION` round trip and the per-profile
   `REQUEST_INSTALL_PACKAGES` grant flow are still unexercised on a device.
@@ -258,8 +260,31 @@ entry point. That install also proves two proxies coexist for one user, which th
 the proxy defined the bridge permission itself.
 
 The premise itself is no longer on this list. It is verified on a real Android system, in a
-secondary profile, on two API levels, in CI on every push: `PREMISE VERIFIED on API 34` /
-`on API 35`, including that `pm uninstall -k` really does preserve the directories afterwards.
+secondary profile, in CI on every push: `PREMISE VERIFIED on API 34` / `on API 35`, including that
+`pm uninstall -k` really does preserve the directories afterwards.
+
+### Why there is no rooted job above API 35
+
+There is **no AOSP `target: default` system image for API 36 or 37**. `sdkmanager --list` offers
+`google_apis`, `google_apis_playstore` and `google_atd` for those levels and nothing else, and
+`google_apis` is production-signed, so `adb root` is refused. Root is not a convenience here:
+planting fixture bytes into a *secondary* user's private storage needs uid 0, because uid 2000 is
+exempt from the FUSE filter only inside its own mount namespace (measured, run #12), and even root
+is refused the FUSE view of another user (run #11) and must use the raw `/data/media/<user>` path.
+
+So API 36 runs a **reduced** job and says so. It still proves, on a real device in a real secondary
+profile: that a generated proxy installs and answers across Binder; that it runs in the intended
+profile; that a write through the bridge lands on the real filesystem; that the platform still
+hides that storage from every other package, so none of it can pass vacuously; that two proxies
+coexist; that the app reaches a *differently-signed* proxy via the generator digest; that traversal
+is refused; and that `<queries><intent>` discovery works without `QUERY_ALL_PACKAGES`. It cannot
+prove the two claims that need root-planted bytes — reading data that **pre-dates** the proxy (the
+backup/restore case), and `pm uninstall -k` preservation — and its final line prints
+`PREMISE VERIFIED (REDUCED, no root)` rather than pretending otherwise. The rooted jobs keep both.
+
+The rooted jobs run with `ALLOW_NO_ROOT=0`, so losing root fails the run loudly. Run #30 is why:
+a single un-retried `adb root` lost the whole API 35 job, and a silently reduced suite would have
+looked identical to a passing one.
 
 ## Known gaps
 
