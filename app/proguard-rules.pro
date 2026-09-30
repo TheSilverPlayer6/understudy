@@ -59,6 +59,22 @@
 -keep class dev.understudy.core.model.** { *; }
 -keep class dev.understudy.install.** { *; }
 
+# androidx.tracing must survive in the APP for the release instrument to start at all.
+# AndroidJUnitRunner.onCreate calls Trace.beginSection, and the runner resolves it through the
+# combined classloader — from whichever APK carries it. The debug app packages it as an
+# unshaken transitive dependency (compose/lifecycle pull tracing 1.1.0→1.2.0 into
+# debugRuntimeClasspath), which is why debug instruments have always worked. R8 correctly
+# strips it from the release app as unreachable *from app code* — and nothing re-adds it on
+# the test side: AGP compiles the androidTest variant with the app's runtime classpath as
+# PROVIDED, so declaring androidTestImplementation(tracing) resolves but is never packaged
+# into the test APK (measured in the sandbox: dependency on debugAndroidTestRuntimeClasspath,
+# class absent from every test dex). The result was run #49's release job: both suites died
+# with "Process crashed." before a single test — NoClassDefFoundError: androidx.tracing.Trace
+# — and the old failure-grep verdict reported the phase GREEN. Keeping the three-class
+# library in the release app restores exactly the debug runtime shape; ~1.5 KB, no behaviour
+# change, nothing in the app calls it.
+-keep class androidx.tracing.** { *; }
+
 # ---- native (none today; guard against future additions) ---------------------------------
 -keepclasseswithmembernames class * { native <methods>; }
 
