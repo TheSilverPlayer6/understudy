@@ -31,10 +31,16 @@ android {
 
     buildTypes {
         release {
-            // Deliberately NOT minified: the packager extracts this dex verbatim and we
-            // need predictable, stable class/method names for our own reflection-free code.
-            isMinifyEnabled = false
+            // Minified, but NOT obfuscated where it matters: proxy/proguard-rules.pro keeps
+            // every class under our namespaces with its real name, so the manifest's component
+            // names still resolve inside the extracted dex and stack traces stay readable.
+            // R8's job here is exactly one thing — tree-shaking the Kotlin stdlib, which was
+            // ~95% of the 2.3 MB dex (the template shipped ~700 KB compressed before this).
+            // The generated proxy is installed on someone's phone over mobile data by an app
+            // whose whole pitch is being lightweight; size is a product property here.
+            isMinifyEnabled = true
             isShrinkResources = false
+            proguardFiles("proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug")
         }
         debug {
@@ -49,7 +55,10 @@ android {
 
     packaging {
         resources {
-            excludes += setOf("/META-INF/**", "DebugProbesKt.bin", "**.kotlin_module")
+            // kotlin_builtins are kotlin-reflect's serialized models of the builtin types.
+            // The proxy never reflects; every template kilobyte is downloaded on someone's
+            // phone inside a generated APK, so they go.
+            excludes += setOf("/META-INF/**", "DebugProbesKt.bin", "**.kotlin_module", "**/*.kotlin_builtins")
         }
     }
 }
