@@ -114,6 +114,15 @@ class TransferDeathPremiseTest {
         writeThroughBridge(bridge, "$srcDir/$bigFile", bigSeed, bigSize)
         println("DEATH-DIAG die: source tree written (${smallFiles.size} small + ${bigSize / (1024 * 1024)} MB)")
 
+        // Proof, at death time and from the proxy's own mouth, that the tree exists — so the
+        // resume phase's view can be compared against a recorded fact rather than a memory.
+        val preDeathStat = runCatching { bridge.statPath(StorageRoot.DATA, srcDir) }
+        println("DEATH-DIAG die: source statPath pre-death -> " +
+            (preDeathStat.getOrNull() ?: preDeathStat.exceptionOrNull()))
+        val preDeathList = runCatching { bridge.list(StorageRoot.DATA, srcDir).map { "${it.name}=${it.sizeBytes}" } }
+        println("DEATH-DIAG die: source list pre-death -> " +
+            (preDeathList.getOrNull() ?: preDeathList.exceptionOrNull()))
+
         // 2. A clean destination, and the journal entry a real pull would write.
         destRoot().deleteRecursively()
         val dest = FileDestination(destRoot())
@@ -207,9 +216,40 @@ class TransferDeathPremiseTest {
             completedBefore.joinToString { "${it.first}=${it.second.length()}B@${it.second.lastModified()}" })
 
         // 3. Re-run the pull exactly as resumeTransfer() would: same root, same path, same
-        //    destination, journal updated and terminated.
+        //    destination, journal updated and terminated. Plan first and LOUDLY: an empty
+        //    plan makes pull() "succeed" without moving a byte, which surfaces as a
+        //    per-file-missing assertion far from the cause (run #55's exact failure shape —
+        //    four jobs, identical). The diagnostics below distinguish "tree absent",
+        //    "tree denied" and "tree listed empty" in one run instead of three.
         val bridge = BridgeClient(context.contentResolver, target)
         val engine = TransferEngine(bridge, dest)
+        val plan = runBlocking { engine.planPull(entry.root, entry.relativePath) }
+        println("DEATH-DIAG resume: planned ${plan.fileCount} file(s), ${plan.totalBytes} bytes: " +
+            plan.files.joinToString { "${it.relativePath}=${it.sizeBytes}" })
+        if (plan.fileCount == 0) {
+            val ping = runCatching { bridge.ping(target) }
+            println("DEATH-DIAG resume: ping -> " +
+                (ping.getOrNull() ?: "${ping.exceptionOrNull()?.javaClass?.name}: ${ping.exceptionOrNull()?.message}"))
+            val rootList = runCatching { bridge.list(entry.root, "").map { it.name } }
+            println("DEATH-DIAG resume: list(root) -> " +
+                (rootList.getOrNull() ?: "${rootList.exceptionOrNull()?.javaClass?.name}: ${rootList.exceptionOrNull()?.message}"))
+            val dirList = runCatching { bridge.list(entry.root, entry.relativePath).map { it.name } }
+            println("DEATH-DIAG resume: list(${entry.relativePath}) -> " +
+                (dirList.getOrNull() ?: "${dirList.exceptionOrNull()?.javaClass?.name}: ${dirList.exceptionOrNull()?.message}"))
+            val st = runCatching { bridge.statPath(entry.root, entry.relativePath) }
+            println("DEATH-DIAG resume: statPath(${entry.relativePath}) -> " +
+                (st.getOrNull() ?: "${st.exceptionOrNull()?.javaClass?.name}: ${st.exceptionOrNull()?.message}"))
+            val stBig = runCatching { bridge.statPath(entry.root, "$entry.relativePath/$bigFile") }
+            println("DEATH-DIAG resume: statPath($bigFile) -> " +
+                (stBig.getOrNull() ?: "${stBig.exceptionOrNull()?.javaClass?.name}: ${stBig.exceptionOrNull()?.message}"))
+        }
+        assertTrue(
+            plan.fileCount > 0,
+            "the source tree the die phase wrote — and proved present through the bridge " +
+                "immediately before dying — is invisible to the resumed process. The " +
+                "DEATH-DIAG lines above and the script's raw-filesystem ls say whether it is " +
+                "absent, denied, or listed empty.",
+        )
         var lastJournaled = -1
         val result = runBlocking {
             engine.pull(entry.root, entry.relativePath) { p ->

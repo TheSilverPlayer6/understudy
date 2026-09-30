@@ -1160,6 +1160,14 @@ if [ "${RUN_DEATH_PHASE:-1}" = "1" ] && [ "$HAVE_ROOT" = "1" ]; then
   fi
   grep -hE "DEATH-DIAG" premise-logs/death-die-instrument.log premise-logs/death-logcat.log 2>/dev/null \
     | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -10 || true
+  # Did the source tree survive the kill ON DISK? The die phase proved it existed through the
+  # bridge; the resume phase reads it back through a RESTARTED provider. When those disagree
+  # (run #55: the resumed pull planned zero files), these two lines say which side lost it —
+  # raw lower fs vs the FUSE view, from root, which no app-level filter can lie to.
+  echo "-- death-phase source tree, raw lower fs: --"
+  adb shell "ls -la '/data/media/$USER_ID/Android/data/$TARGET_PKG/death-test-src/' 2>&1 | head -8" || true
+  echo "-- death-phase source tree, FUSE view: --"
+  adb shell "ls -la '/storage/emulated/$USER_ID/Android/data/$TARGET_PKG/death-test-src/' 2>&1 | head -8" || true
 
   log "process-death phase 2: a fresh process must find the journal and finish the transfer"
   DEATH_VERDICT=0
@@ -1180,6 +1188,10 @@ if [ "${RUN_DEATH_PHASE:-1}" = "1" ] && [ "$HAVE_ROOT" = "1" ]; then
   if [ "$DEATH_VERDICT" -ne 0 ]; then
     echo "!! process-death resume verdict=$DEATH_VERDICT (1 = test failures, 2 = guest crashed or produced no result)"
     grep -A25 -E "FAILURES!!!|Error in |INSTRUMENTATION_ABORTED" premise-logs/death-resume-instrument.log | head -70 || true
+    echo "-- source tree state at failure, raw lower fs: --"
+    adb shell "ls -la '/data/media/$USER_ID/Android/data/$TARGET_PKG/death-test-src/' 2>&1 | head -8" || true
+    echo "-- destination state at failure (app-specific external, via run-as or raw): --"
+    adb shell "ls -laR '/data/media/$USER_ID/Android/data/$APP_PKG/files/death-test-dest/' 2>&1 | head -20" || true
     echo "!! PROCESS-DEATH RECOVERY FAILED: the journal did not carry a real kill into a"
     echo "!!   byte-exact resumed transfer. This is the guarantee §3.6 exists for."
     exit 1
