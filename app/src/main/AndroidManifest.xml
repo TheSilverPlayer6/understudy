@@ -56,6 +56,32 @@
           whole reason this app exists.
     -->
 
+    <!--
+      Makes the proxies this app generates VISIBLE to it. Without this the bridge is unreachable
+      and the failure is `IllegalArgumentException: Unknown authority <target>` — identical to
+      "no proxy is installed", which is why CI run #29 was so misleading.
+
+      Package visibility is filtered from API 30, and the filter applies to ContentResolver
+      authority resolution, not just to the query APIs. The target package name is chosen when the
+      proxy APK is generated, so it cannot be named statically in <queries><package> or
+      <queries><provider> (the authority IS the package name). An intent signature can be: every
+      proxy advertises this action and nothing else does, so this matches exactly the set of
+      proxies we made — which is why QUERY_ALL_PACKAGES is still not requested.
+
+      The action must equal BridgeContract.DISCOVERY_ACTION and the <action> in
+      proxy/src/main/AndroidManifest.xml. <queries><intent> requires exactly one <action>.
+
+      This used to be unnecessary by accident: the proxy defined BRIDGE and this app requested it,
+      and AOSP AppsFilter makes a package visible to anything requesting a permission it defines.
+      Moving the definition here (see the <permission> below for why that was mandatory) silently
+      removed that visibility. BridgePermissionOwnershipTest now pins both halves.
+    -->
+    <queries>
+        <intent>
+            <action android:name="dev.understudy.action.PROXY_DISCOVERY" />
+        </intent>
+    </queries>
+
     <application
         android:name=".UnderstudyApp"
         android:allowBackup="false"

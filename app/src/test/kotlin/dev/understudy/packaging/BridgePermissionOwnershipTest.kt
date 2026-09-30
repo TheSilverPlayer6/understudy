@@ -175,6 +175,105 @@ class BridgePermissionOwnershipTest {
         )
     }
 
+    // ---- the other half: the app must be able to SEE the proxy --------------
+
+    /**
+     * Visibility is the failure mode that produced CI run #29, and it is the one that looks least
+     * like a permission problem.
+     *
+     * From API 30 the platform filters package visibility, and the filter covers
+     * `ContentResolver` authority resolution — so an app that cannot see the proxy gets
+     * `IllegalArgumentException: Unknown authority <target>`, which is indistinguishable from "no
+     * proxy is installed". Run #29 failed exactly that way on both API levels, five tests down,
+     * while `adb shell content query --user 10 --uri content://com.example.targetgame/data`
+     * returned rows and `content call … --method ping` returned `ok=true` in the same log. The
+     * shell is not filtered; the app is.
+     *
+     * Until then the bridge had worked without any `<queries>` declaration, by accident: the proxy
+     * *defined* `BRIDGE` and the app *requested* it, and AOSP `AppsFilter.addPackageInternal`
+     * populates `mQueryableViaUsesPermission` so that a package becomes visible to anything
+     * requesting a permission it defines. Moving the definition to `:app` — mandatory, see above —
+     * silently deleted that visibility.
+     *
+     * What replaces it has to be a *static* declaration, because the target package name is chosen
+     * when the APK is generated: `<queries><package>` cannot name it, `<queries><provider>` cannot
+     * either (the authority is the package name), and a per-target permission the proxy defines
+     * cannot be requested statically. `<queries><intent>` is the only mechanism that matches a set
+     * of packages whose names are unknown at build time, so every proxy advertises
+     * [dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION] and the app queries for it.
+     * `QUERY_ALL_PACKAGES` would also work and is deliberately not used.
+     */
+    @Test
+    fun theTemplateAdvertisesTheDiscoveryActionAndTheAppQueriesForIt() {
+        val action = dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION
+
+        // Built by concatenation rather than as a raw string: a Kotlin raw string cannot contain
+        // the `"` that closes an XML attribute value adjacent to its own `"""` delimiter.
+        val attr = "android:name=\"" + action + "\""
+
+        // 1. the app declares <queries> for it
+        val app = appManifest.readText()
+        val queries = app.substringAfter("<queries>", "").substringBefore("</queries>", "")
+        assertTrue(
+            queries.isNotBlank() && queries.contains(attr),
+            ":app must declare <queries><intent> for $action, or the proxies it generates are " +
+                "invisible to it and every bridge call fails with 'Unknown authority'",
+        )
+
+        // 2. the proxy source advertises it
+        val proxy = proxyManifest.readText()
+        assertTrue(
+            proxy.contains(attr),
+            ":proxy must advertise $action on a component, or <queries> matches nothing",
+        )
+        assertTrue(
+            proxy.contains(".ProxyDiscoveryReceiver"),
+            "the discovery action must live on ProxyDiscoveryReceiver, a component nothing ever " +
+                "disables — putting it on ProxyStatusActivity would make the proxy unreachable " +
+                "the moment KEEP_HIDDEN teardown hides it, which is when it must still be callable",
+        )
+
+        // 3. and so does the committed binary template — the bytes that actually ship
+        val doc = AxmlStringPool.parse(templateManifestBytes())
+        assertTrue(
+            action in doc.strings,
+            "the committed template does not advertise $action; rebuild it with " +
+                "./gradlew :app:syncProxyTemplate. Pool: ${doc.strings}",
+        )
+        assertTrue(
+            "${ManifestPatcher.TEMPLATE_PACKAGE}.ProxyDiscoveryReceiver" in doc.strings,
+            "the discovery receiver is missing from the committed template",
+        )
+        assertTrue("receiver" in doc.strings, "no <receiver> element in the committed template")
+    }
+
+    /**
+     * Retargeting must leave the discovery action and the receiver's class name alone — the same
+     * rule that already protects `ProxyFileBridge`'s class name, and for the same reason: the dex
+     * keeps `Ldev/understudy/proxytpl/ProxyDiscoveryReceiver;`, so a rewritten manifest name makes
+     * PackageManager look for a class that does not exist.
+     *
+     * A rewritten *action* would be quieter and worse: the proxy would install and run, the app's
+     * `<queries>` would simply stop matching it, and the symptom would again be "Unknown authority".
+     */
+    @Test
+    fun retargetingPreservesTheDiscoveryActionAndReceiverClassName() {
+        val action = dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION
+        val doc = AxmlStringPool.parse(
+            ManifestPatcher.rename(templateManifestBytes(), "com.example.targetgame").bytes,
+        )
+
+        assertTrue(action in doc.strings, "retargeting rewrote the discovery action")
+        assertTrue(
+            "${ManifestPatcher.TEMPLATE_PACKAGE}.ProxyDiscoveryReceiver" in doc.strings,
+            "retargeting rewrote the receiver's class name; the dex still has the old one",
+        )
+        assertFalse(
+            "com.example.targetgame.ProxyDiscoveryReceiver" in doc.strings,
+            "component names must not follow the package rename",
+        )
+    }
+
     /**
      * Guards the guard: if `protectionLevel` ever stopped being the discriminator this whole test
      * class would pass vacuously. Assert it is present in a manifest that *does* define the

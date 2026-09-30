@@ -18,6 +18,21 @@ object BridgeContract {
     /** The authority is the (re-targeted) package name itself. */
     fun authorityFor(packageName: String): String = packageName
 
+    /**
+     * The intent action every proxy advertises purely so that this app can *find* it.
+     *
+     * Package visibility is filtered from API 30, and `ContentResolver` authority resolution is
+     * filtered too — an invisible provider produces `IllegalArgumentException: Unknown authority`,
+     * which is indistinguishable from "no proxy is installed". The target package name is only
+     * known at generation time, so neither `<queries><package>` nor `<queries><provider>` can
+     * name it statically. `<queries><intent>` can: it matches *any* package advertising this
+     * action, which is every proxy and nothing else.
+     *
+     * Must equal the action in `proxy/src/main/AndroidManifest.xml`, and must be advertised by a
+     * component that is never disabled — see `ProxyDiscoveryReceiver`.
+     */
+    const val DISCOVERY_ACTION: String = "dev.understudy.action.PROXY_DISCOVERY"
+
     const val ROOT_DATA: String = "data"
     const val ROOT_OBB: String = "obb"
     val ROOTS: List<String> = listOf(ROOT_DATA, ROOT_OBB)

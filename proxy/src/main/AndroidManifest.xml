@@ -42,6 +42,33 @@
             android:permission="dev.understudy.permission.BRIDGE" />
 
         <!--
+          Discovery anchor. Exported so that Understudy's `<queries><intent>` matches it, which is
+          what makes this package *visible* to the app that generated it — and an invisible
+          provider is unreachable, with `IllegalArgumentException: Unknown authority` as the only
+          symptom.
+
+          Deliberately NOT the launcher activity below: KEEP_HIDDEN teardown disables that one, and
+          visibility is computed from enabled components, so a filter there would vanish exactly
+          when the app needs to reach the bridge to un-hide the proxy. Nothing ever disables this.
+
+          The action string must equal `BridgeContract.DISCOVERY_ACTION` on both sides, and
+          `BridgeIntegrationTest.theTwoCopiesOfTheContractAgree` pins the constant while
+          `BridgePermissionOwnershipTest` pins its presence in this template.
+
+          Guarded by BRIDGE so a stranger cannot broadcast to it and wake this process. The guard
+          does not affect discoverability: the platform matches `<queries>` intents against parsed
+          intent filters, not against component permissions.
+        -->
+        <receiver
+            android:name=".ProxyDiscoveryReceiver"
+            android:exported="true"
+            android:permission="dev.understudy.permission.BRIDGE">
+            <intent-filter>
+                <action android:name="dev.understudy.action.PROXY_DISCOVERY" />
+            </intent-filter>
+        </receiver>
+
+        <!--
           Only exists so the user can see something is installed, and so we can be
           disabled to hide the proxy from the launcher without uninstalling it.
         -->

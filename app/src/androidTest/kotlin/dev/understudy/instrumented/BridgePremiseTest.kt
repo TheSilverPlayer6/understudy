@@ -371,6 +371,104 @@ class BridgePremiseTest {
         assertTrue(result.isFailure, "a client pointed at an unrelated package should not succeed")
     }
 
+    /**
+     * Measures how much of the proxy is visible to this app, and pins the design decision that
+     * follows from it: **presence is determined by calling the provider, never by querying
+     * PackageManager.**
+     *
+     * This exists because a plausible-looking `ProxyInstaller.isInstalled(pkg)` was removed. It
+     * asked `getPackageInfo(pkg, 0)` and swallowed `NameNotFoundException` into `false`. Two
+     * things were wrong with it, and only a device can settle the first:
+     *
+     *  1. `getPackageInfo` is named in the platform docs as subject to package-visibility
+     *     filtering from API 30, and nothing in the automatic-visibility list covers "an app
+     *     whose content provider I queried" — the automatic rule runs the *other* way, which is
+     *     what lets the proxy authenticate its caller. So an installed proxy could report as
+     *     absent, silently, with no way to distinguish that from a genuine absence.
+     *  2. Even a truthful answer is the wrong question. The orchestrator needs "can I reach the
+     *     bridge?", and `ping()` answers that strictly more strongly: live provider, granted
+     *     signature permission, matching protocol version, correct profile.
+     *
+     * The individual query APIs are printed rather than asserted, because the honest answer may
+     * differ by API level and OEM build, and a red CI run over a diagnostic would train everyone
+     * to ignore it. What *is* asserted is the two invariants the product depends on:
+     *
+     *  - the app holds no `QUERY_ALL_PACKAGES`, so the Play-restricted permission is never needed;
+     *  - the proxy resolves through `<queries><intent>` against `BridgeContract.DISCOVERY_ACTION`.
+     *    This is the mechanism that makes the provider reachable at all, and run #29 is what
+     *    happens without it: five tests failing with `Unknown authority` against a provider that
+     *    the shell could query successfully in the same log.
+     */
+    @Test
+    fun theProxyIsVisibleThroughTheDiscoveryIntentWithoutQueryAllPackages() {
+        val pm = context.packageManager
+
+        assertEquals(
+            android.content.pm.PackageManager.PERMISSION_DENIED,
+            context.checkSelfPermission(android.Manifest.permission.QUERY_ALL_PACKAGES),
+            "this suite must not hold QUERY_ALL_PACKAGES, or it stops proving that the bridge " +
+                "works without it — and the app must never request it (Play-restricted)",
+        )
+
+        val ping = runCatching { client().ping(target) }
+        println("PREMISE-DIAG ping=$ping")
+        assertTrue(
+            ping.isSuccess,
+            "the provider is unreachable while provider access is the only detection mechanism: " +
+                "${ping.exceptionOrNull()}",
+        )
+
+        // Informational: how the package-query APIs see the proxy from here. Recorded so the
+        // removed isInstalled() is not re-added on the strength of a guess.
+        val getInfo = runCatching { pm.getPackageInfo(target, 0) }
+        val appInfo = runCatching { pm.getApplicationInfo(target, 0) }
+        val resolveProvider = runCatching { pm.resolveContentProvider(target, 0) }
+        val launch = runCatching { pm.getLaunchIntentForPackage(target) }
+        println("PREMISE-DIAG visibility from the app, no QUERY_ALL_PACKAGES:")
+        println("PREMISE-DIAG   getPackageInfo       = ${describe(getInfo)}")
+        println("PREMISE-DIAG   getApplicationInfo   = ${describe(appInfo)}")
+        println("PREMISE-DIAG   resolveContentProvider = ${describe(resolveProvider)}")
+        println("PREMISE-DIAG   getLaunchIntentForPackage = ${describe(launch)}")
+
+        // The mechanism the app actually relies on: <queries><intent> against the discovery action
+        // every proxy advertises. If this is empty the bridge is unreachable no matter how
+        // correct the provider is, and the failure will surface as "Unknown authority".
+        val discovery = runCatching<List<String>> { discoveryPackages(pm) }
+        println("PREMISE-DIAG   queryIntentReceivers(${dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION}) = ${describe(discovery)}")
+        val found = discovery.getOrNull().orEmpty()
+        assertTrue(
+            target in found,
+            "the proxy is not visible through <queries><intent>. Without visibility the platform " +
+                "refuses to resolve its provider and every bridge call fails with " +
+                "'Unknown authority' — indistinguishable from a proxy that is not installed. " +
+                "Resolved: $found",
+        )
+        println("PREMISE-DIAG   => discovery resolves $target; provider access works")
+    }
+
+    /**
+     * Which packages advertise [dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION], i.e. which
+     * proxies this app's `<queries><intent>` makes visible to it.
+     *
+     * `queryBroadcastReceivers(Intent, int)` is deprecated on API 33 in favour of a
+     * `ResolveInfoFlags` overload, but it is not removed and it is the only form that compiles
+     * against minSdk 26 without an SDK branch. Suppressed rather than branched: both call the same
+     * resolution path, and this is a diagnostic in an instrumented test, not product code.
+     *
+     * Note this query is itself subject to the visibility filter, which is the point — it reports
+     * what the app is *allowed* to see, not what is installed.
+     */
+    @Suppress("DEPRECATION")
+    private fun discoveryPackages(pm: android.content.pm.PackageManager): List<String> {
+        val intent = android.content.Intent(dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION)
+        return pm.queryBroadcastReceivers(intent, 0).mapNotNull { it.activityInfo?.packageName }
+    }
+
+    private fun describe(r: Result<*>): String = when {
+        r.isSuccess -> "OK (${r.getOrNull()})"
+        else -> "${r.exceptionOrNull()?.javaClass?.simpleName}: ${r.exceptionOrNull()?.message}"
+    }
+
     companion object {
         private const val PER_USER_RANGE = 100_000
         const val PLANTED_DIR = "planted"

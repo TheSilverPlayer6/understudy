@@ -16,6 +16,29 @@ object BridgeContract {
     /** Authority suffix-free: the authority *is* the (re-targeted) package name. */
     fun authorityFor(packageName: String): String = packageName
 
+    // ---- discovery ---------------------------------------------------------
+
+    /**
+     * The intent action this proxy advertises so Understudy can find it.
+     *
+     * From API 30 the platform filters package visibility, and that filtering applies to
+     * `ContentResolver` authority resolution as well as to the query APIs: an app that cannot see
+     * a provider gets `IllegalArgumentException: Unknown authority`, which is indistinguishable
+     * from "nothing is installed there". Understudy cannot name us in `<queries><package>` or
+     * `<queries><provider>`, because our package name and authority are chosen when the APK is
+     * generated. It *can* declare `<queries><intent>` for this action, which matches every proxy
+     * and nothing else.
+     *
+     * Advertised by `ProxyDiscoveryReceiver`, a component that is deliberately separate from
+     * `ProxyStatusActivity`: the keep-installed-and-hidden teardown disables that activity, and a
+     * disabled component stops matching, which would make the proxy unreachable at the exact
+     * moment the app needs to reach it to un-hide it.
+     *
+     * Must equal `:app`'s `BridgeContract.DISCOVERY_ACTION`. The two copies are compared by
+     * reflection in `BridgeIntegrationTest.theTwoCopiesOfTheContractAgree`.
+     */
+    const val DISCOVERY_ACTION: String = "dev.understudy.action.PROXY_DISCOVERY"
+
     // ---- roots -------------------------------------------------------------
 
     /** `Android/data/<pkg>` — in-app save data, caches, external files. */

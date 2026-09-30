@@ -76,6 +76,29 @@ adb shell am start-user "$USER_ID" 2>&1 || true
 sleep 5
 adb shell pm list users
 
+# INSTALL ORDER IS DELIBERATE, and it matches production rather than being convenient.
+#
+# The app goes in FIRST, because on a real device the app is what generates and installs the
+# proxy — the reverse order is not a state a user can reach. It also matters technically: from
+# API 30 the app can only reach a provider it is allowed to *see*, and visibility is computed by
+# AOSP AppsFilter at package-scan time in both directions, so either order works — but only the
+# production order is the one worth testing.
+#
+# Note what is NOT done here: `adb install -i $APP_PKG`, which would also record the app as the
+# installer and grant visibility through AppsFilter's separate canQueryAsInstaller path. That
+# would be more faithful to production and would make this suite pass even if the <queries>
+# declaration were broken, hiding the regression. Installing via plain adb leaves <queries> as
+# the ONLY visibility mechanism under test, which is the stricter configuration and the one that
+# must hold for a proxy the user installed by hand.
+log "install the app under test for user $USER_ID"
+APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
+TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1)"
+echo "app=$APP_APK"; echo "test=$TEST_APK"
+adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
+adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
+adb shell pm list packages --user "$USER_ID" | grep -F "$APP_PKG" \
+  || { echo "!! the app under test is not installed for user $USER_ID"; exit 1; }
+
 log "install the proxy APK for user $USER_ID"
 adb install --user "$USER_ID" -r /tmp/proxy.apk 2>&1 | tee premise-logs/install-proxy.log
 adb shell pm list packages --user "$USER_ID" | grep -F "$TARGET_PKG" \
@@ -85,8 +108,16 @@ log "install the production-signed proxy for user $USER_ID"
 # Signed with a DIFFERENT key than the app, carrying the app's certificate digest — the production
 # key layout. If this file is missing the caller-auth phase below is skipped loudly rather than
 # silently passing, so a harness regression cannot masquerade as coverage.
+#
+# This is also the artifact that proves two proxies can coexist at all. Both carry the same
+# provider permission requirement; neither defines it. When the proxy used to define
+# dev.understudy.permission.BRIDGE itself, this second install died with
+# INSTALL_FAILED_DUPLICATE_PERMISSION in under ten seconds (run #28) — a device-wide collision
+# between two packages that share no code and no user.
 if [ -f /tmp/proxy-prodsign.apk ]; then
   adb install --user "$USER_ID" -r /tmp/proxy-prodsign.apk 2>&1 | tee premise-logs/install-proxy-prodsign.log
+  grep -q "INSTALL_FAILED_DUPLICATE_PERMISSION" premise-logs/install-proxy-prodsign.log \
+    && { echo "!! two proxies collided on a permission definition — the proxy must not define BRIDGE"; exit 1; }
   adb shell pm list packages --user "$USER_ID" | grep -F "$PRODSIGN_PKG" \
     || { echo "!! production-signed proxy ($PRODSIGN_PKG) is not installed for user $USER_ID"; exit 1; }
 else
@@ -94,12 +125,29 @@ else
   exit 1
 fi
 
-log "install the app under test for user $USER_ID"
-APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
-TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1)"
-echo "app=$APP_APK"; echo "test=$TEST_APK"
-adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
-adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
+log "confirm both proxies are installed side by side"
+# The whole point of moving the permission definition to :app. One proxy working was never enough:
+# reaching several targets is the product.
+adb shell pm list packages --user "$USER_ID" | grep -E "$TARGET_PKG|$PRODSIGN_PKG" | tee premise-logs/both-proxies.log
+COUNT="$(grep -cE "$TARGET_PKG|$PRODSIGN_PKG" premise-logs/both-proxies.log || true)"
+if [ "$COUNT" -lt 2 ]; then
+  echo "!! only $COUNT of the two proxies is installed for user $USER_ID; coexistence is broken"
+  exit 1
+fi
+echo "OK: $COUNT proxies coexist for user $USER_ID"
+
+log "who defines the bridge permission, and what can the app see?"
+# Run #29 failed with "Unknown authority" from the app while `content query` from the shell worked
+# in the same log. That gap is package-visibility filtering, and it is invisible unless asked
+# about directly. dumpsys is the ground truth for what AppsFilter computed.
+adb shell dumpsys package permission dev.understudy.permission.BRIDGE 2>&1 | head -25 \
+  | tee premise-logs/permission-owner.log || true
+echo "-- AppsFilter state for the app (forceQueryable / queries) --"
+adb shell dumpsys package queries 2>&1 | grep -A6 -E "$APP_PKG|$TARGET_PKG|$PRODSIGN_PKG" \
+  | head -60 | tee premise-logs/queries.log || true
+echo "-- does the discovery action resolve? (this is what <queries><intent> buys) --"
+adb shell cmd package query-receivers --components -a dev.understudy.action.PROXY_DISCOVERY 2>&1 \
+  | head -20 | tee premise-logs/discovery-query.log || true
 
 log "plant known bytes in the proxy's private storage"
 # These directories do not exist yet, and that is the point: the proxy must be able to see data
