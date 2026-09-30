@@ -850,6 +850,24 @@ else
 fi
 set -e
 
+log "SAF feasibility probe: can a shell grant a tree URI to the app? (informational)"
+# HANDOFF §3.5: SAF writes are verified only against fakes because a persistable tree grant
+# normally comes from the ACTION_OPEN_DOCUMENT_TREE picker — a human. If the shell could grant
+# the same URI (root bypasses the grant check in ActivityManagerService), CI could instrument
+# SafDestination without one. This probe settles which, if any, of the candidate commands
+# exists on each API level; it changes nothing and must never affect the verdict. Everything
+# is best-effort, timeboxed, and the outputs are the deliverable.
+SAF_TREE_URI="content://com.android.externalstorage.documents/tree/primary%3ADocuments"
+echo "-- candidate 1: content grant-uri-permission --"
+timeout 30 adb shell content grant-uri-permission --user "$USER_ID" --uri "$SAF_TREE_URI" --permission 67 2>&1 | head -4 || true
+echo "-- candidate 2: pm grant-uri-permission (positional) --"
+timeout 30 adb shell pm grant-uri-permission "$APP_PKG" "$SAF_TREE_URI" 67 2>&1 | head -4 || true
+echo "-- candidate 3: am broadcast with a URI grant (explicit, to our own receiver-less package) --"
+timeout 30 adb shell am broadcast -a dev.understudy.action.SAF_GRANT_PROBE -p "$APP_PKG" \
+  --user "$USER_ID" -d "$SAF_TREE_URI" --grant-read-uri-permission --grant-write-uri-permission 2>&1 | head -4 || true
+echo "-- what grants does the app hold afterwards? --"
+timeout 30 adb shell dumpsys activity uri-permissions 2>&1 | grep -A4 -B2 "$APP_PKG" | head -30 || true
+echo "-- (end of SAF probe; a working candidate here would unlock instrumented SAF coverage) --"
 
 log "diagnostic output from inside the app's own mount namespace"
 # The test app's view. Note this is evidence about the RESTRICTION, not about the mechanism:
@@ -925,7 +943,6 @@ if [ "$CALLERAUTH_VERDICT" -ne 0 ]; then
 fi
 echo "CALLER-AUTH VERIFIED on API $API: the app reached a proxy signed with a DIFFERENT key"
 echo "  ($PRODSIGN_PKG) via the generator-certificate digest path."
-
 
 # --------------------------------------------------------------------------------------------
 # The in-app install path (HANDOFF §3.4). Everything above installed with `adb install --user`,
@@ -1013,7 +1030,6 @@ log "remove the test user"
 if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
   adb shell pm uninstall --user "$USER_ID" "${INSTALLER_PKG:-com.example.installtarget}" 2>&1 || true
 fi
-
 adb shell pm remove-user "$USER_ID" 2>&1 || true
 
 echo
