@@ -93,8 +93,9 @@ class ManifestPatcherTest {
 
     @Test
     fun `rename keeps the string count and chunk chain intact`() {
-        val before = AxmlStringPool.parse(template())
-        val after = ManifestPatcher.rename(template(), "a.very.different.pkg.name").bytes
+        val raw = template()
+        val before = AxmlStringPool.parse(raw)
+        val after = ManifestPatcher.rename(raw, "a.very.different.pkg.name").bytes
         val parsed = AxmlStringPool.parse(after)
 
         assertEquals(before.strings.size, parsed.strings.size, "string count must not change")
@@ -104,18 +105,34 @@ class ManifestPatcherTest {
         // File-level declared size must equal the actual length, or PackageManager refuses it.
         assertEquals(after.size, readU32(after, 4), "file header size does not match payload")
 
-        // And the tail (resource map + XML nodes) must still walk cleanly to the end.
-        var pos = parsed.fileHeaderSize
-        pos += readU32(after, pos + 4)
+        // The rename is a pure string-*content* edit, so it must not add, drop or reorder chunks.
+        // Comparing the renamed tree against the ORIGINAL — rather than against a hardcoded floor
+        // — is both a stronger invariant and robust to the template legitimately gaining or losing
+        // an element: the BRIDGE <permission> definition moved to :app, which removed one element
+        // (two chunks) from the proxy manifest and would otherwise have silently invalidated a
+        // magic number here. walkChunks also asserts each chain lands exactly on EOF.
+        val beforeChunks = walkChunks(raw, before.fileHeaderSize)
+        val afterChunks = walkChunks(after, parsed.fileHeaderSize)
+        assertEquals(beforeChunks, afterChunks, "rename changed the element/chunk structure")
+        assertTrue(afterChunks >= 15, "expected the full element tree, walked only $afterChunks chunks")
+    }
+
+    /**
+     * Walks every chunk after the string pool (resource map + XML nodes), asserting the chain is
+     * well-formed and lands exactly on EOF, and returns how many chunks it contained.
+     */
+    private fun walkChunks(b: ByteArray, fileHeaderSize: Int): Int {
+        var pos = fileHeaderSize
+        pos += readU32(b, pos + 4) // step over the string-pool chunk by its declared size
         var chunks = 0
-        while (pos < after.size) {
-            val size = readU32(after, pos + 4)
+        while (pos < b.size) {
+            val size = readU32(b, pos + 4)
             assertTrue(size > 0, "non-positive chunk size at $pos")
             pos += size
             chunks++
         }
-        assertEquals(after.size, pos, "chunk chain does not land exactly on EOF")
-        assertTrue(chunks >= 20, "expected the full element tree, walked only $chunks chunks")
+        assertEquals(b.size, pos, "chunk chain does not land exactly on EOF")
+        return chunks
     }
 
     @Test

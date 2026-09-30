@@ -179,6 +179,61 @@ val syncProxyTemplate = tasks.register<Copy>("syncProxyTemplate") {
 }
 
 /**
+ * Refreshes the binary-manifest fixture `ManifestPatcherTest` parses.
+ *
+ * The fixture is `proxy-debug.apk!/AndroidManifest.xml`, committed at
+ * `src/test/resources/dev/understudy/packaging/axml/template-manifest.axml`. Testing against real
+ * aapt2 output rather than a synthetic AXML is the whole point of that suite — it pins the
+ * string-pool layout, flags and alignment the toolchain actually emits — but it only works while
+ * the fixture tracks the sources it came from.
+ *
+ * Nothing else would notice if it drifted: `checkProxyTemplateFresh` guards the *release* asset
+ * the app ships, not this *debug* test resource, and a stale fixture keeps passing while asserting
+ * the shape of a manifest that no longer exists. That is the failure mode this project has already
+ * been burned by once — a green JVM suite asserting behaviour a device contradicted.
+ *
+ *     ./gradlew :app:syncManifestFixture
+ *
+ * Standalone for the same reason as [syncProxyTemplate]: it writes into a source directory
+ * (`src/test/resources`), and a task that does so cannot share a task graph with the `lintVital*`
+ * family without tripping Gradle 9's implicit-dependency validation.
+ */
+val manifestFixture = layout.projectDirectory.file(
+    "src/test/resources/dev/understudy/packaging/axml/template-manifest.axml"
+)
+
+tasks.register("syncManifestFixture") {
+    group = "build"
+    description = "Extracts proxy-debug.apk's binary manifest into the ManifestPatcherTest fixture"
+    dependsOn(":proxy:assembleDebug")
+
+    // Resolved at configuration time. Referring to `project` from inside doLast fails under the
+    // configuration cache with "Invocation of 'Task.project' by task ... at execution time is
+    // unsupported"; plain File values are what the action gets.
+    val source: File = layout.projectDirectory
+        .dir("../proxy/build/outputs/apk/debug")
+        .file("proxy-debug.apk")
+        .asFile
+    val destination: File = manifestFixture.asFile
+
+    inputs.file(source)
+    outputs.file(destination)
+
+    doLast {
+        if (!source.isFile) {
+            throw GradleException("Expected the :proxy debug APK at ${source.path} but it is not there.")
+        }
+        val bytes = ZipFile(source).use { zip ->
+            val entry = zip.getEntry("AndroidManifest.xml")
+                ?: throw GradleException("${source.path} has no AndroidManifest.xml")
+            zip.getInputStream(entry).readBytes()
+        }
+        destination.parentFile.mkdirs()
+        destination.writeBytes(bytes)
+    }
+}
+
+/**
  * Fails the build if the committed template has drifted from what `:proxy` builds today.
  *
  * [syncProxyTemplate] is manual, so nothing else stops `:app` from shipping a template that is

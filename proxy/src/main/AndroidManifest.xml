@@ -2,14 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Signature-level guard for the bridge provider. Because the proxy APK is signed with
-      Understudy's own key, only Understudy (same signer) can ever be granted this.
-      `protectionLevel="signature"` needs no runtime grant and no user prompt.
-    -->
-    <permission
-        android:name="dev.understudy.permission.BRIDGE"
-        android:protectionLevel="signature" />
+      The bridge provider requires the signature-level `dev.understudy.permission.BRIDGE`, but this
+      APK deliberately does NOT define it — the Understudy app does.
 
+      A `signature` permission is granted only to packages signed like whichever package defines
+      it. This APK is signed with a per-install key generated on the device (SigningIdentity), so
+      if it defined BRIDGE, only packages sharing that throwaway key could hold it — and the
+      Understudy app, signed with its own build-time key, never could. The platform enforces a
+      provider's android:permission BEFORE any of the provider's code runs, so the app would be
+      refused at the gate and ProxyFileBridge.enforceCaller()'s generator-certificate digest check
+      would never execute. Letting the app define BRIDGE (tied to the app's certificate, which the
+      app matches) opens the gate for the legitimate caller, and the digest the generator baked
+      into this APK's assets is what actually pins it to the exact install that made it.
+
+      Requiring a permission defined by another package is ordinary Android; the platform resolves
+      it device-wide by name. The app is always installed before the proxy it generates, so the
+      definition is present by the time this provider is reached.
+    -->
     <application
         android:allowBackup="false"
         android:hasFragileUserData="true"

@@ -111,17 +111,33 @@ class CallerAuthPremiseTest {
 
     /**
      * `call()` (ping) is only one of the three gated provider entry points. `query()` and
-     * `openFile()` are gated identically, so a full write→read→list round trip proves the digest
-     * authorisation holds for the whole surface, not just the handshake.
+     * `openFile()` are gated identically, so a full mkdir→write→read→list round trip proves the
+     * digest authorisation holds for the whole surface, not just the handshake.
      *
      * The proxy owns `Android/data/<target>` (it creates it as its own uid on first access), so
      * this needs no root-planted fixtures — unlike the FUSE premise, which reads data that predates
      * the proxy. What is being tested here is authorisation, not the FUSE grant.
+     *
+     * The explicit `mkdirs` is required, not incidental: `ProxyFileBridge.openFile` refuses a
+     * write whose parent directory does not exist (a write mode must not silently create a
+     * directory entry, and must not follow a path whose parent is missing), and
+     * `BridgeClient.openFile` does not create parents either. `BridgePremiseTest` gets away
+     * without this only because CI root-plants its `planted/` directory first. Going through
+     * `call(MKDIRS)` here is a bonus: it is a fourth gated entry point, so the round trip covers
+     * `call`, `openFile` (both directions) and `query`.
      */
     @Test
     fun digestAuthorisationCoversQueryAndOpenFileToo() {
-        val path = "callerauth-probe/round-trip.txt"
+        val dir = "callerauth-probe"
+        val path = "$dir/round-trip.txt"
         val payload = "production caller-auth round trip ${System.currentTimeMillis()}"
+
+        val mkdirs = runCatching { client().mkdirs(StorageRoot.DATA, dir) }
+        mkdirs.exceptionOrNull()?.let {
+            println("CALLERAUTH-DIAG mkdirs FAILED: ${it.javaClass.name}: ${it.message} " +
+                "(cause ${it.cause?.javaClass?.name}: ${it.cause?.message})")
+        }
+        assertTrue(mkdirs.isSuccess, "call(mkdirs) through the digest path failed: ${mkdirs.exceptionOrNull()}")
 
         val write = runCatching {
             client().openFile(StorageRoot.DATA, path, "w").use { pfd ->
@@ -144,10 +160,20 @@ class CallerAuthPremiseTest {
         assertTrue(read.isSuccess, "openFile('r') through the digest path failed: ${read.exceptionOrNull()}")
         assertEquals(payload, String(read.getOrThrow(), Charsets.UTF_8))
 
-        val listed = runCatching { client().list(StorageRoot.DATA, "callerauth-probe").map { it.name } }
+        val listed = runCatching { client().list(StorageRoot.DATA, dir).map { it.name } }
         assertTrue(listed.isSuccess, "query() through the digest path failed: ${listed.exceptionOrNull()}")
         assertTrue("round-trip.txt" in listed.getOrThrow(), "written file not listed: ${listed.getOrNull()}")
-        println("CALLERAUTH-DIAG query+openFile round trip OK")
+
+        // Confirmed by the proxy itself, for the reason BridgePremiseTest documents at length:
+        // the caller cannot stat this path, because the platform hides it — that is the point.
+        val stated = runCatching { client().statPath(StorageRoot.DATA, path) }
+        assertTrue(stated.isSuccess, "call(statPath) through the digest path failed: ${stated.exceptionOrNull()}")
+        val onDisk = stated.getOrThrow()
+        assertTrue(
+            onDisk.exists && !onDisk.isDirectory && onDisk.sizeBytes == payload.toByteArray().size.toLong(),
+            "the proxy does not report the file it just wrote: $onDisk",
+        )
+        println("CALLERAUTH-DIAG mkdirs+query+openFile round trip OK ($onDisk)")
     }
 
     /**

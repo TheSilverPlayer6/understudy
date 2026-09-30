@@ -23,9 +23,11 @@ import java.io.FileNotFoundException
  * service, and the provider is started on demand even when this user profile is in the
  * background.
  *
- * Security posture: exported, but guarded by the `signature`-level
- * `dev.understudy.permission.BRIDGE`, and every path goes through [BridgePaths] so a caller
- * cannot escape the two roots.
+ * Security posture: exported, but behind two gates — the `signature`-level
+ * `dev.understudy.permission.BRIDGE` on the provider (defined by the Understudy *app*, so that it
+ * can hold it in production; see [enforceCaller]), and [enforceCaller]'s own check that the
+ * calling uid is signed by the certificate of the install that generated this APK. Every path
+ * additionally goes through [BridgePaths] so a caller cannot escape the two roots.
  */
 class ProxyFileBridge : ContentProvider() {
 
@@ -586,8 +588,12 @@ class ProxyFileBridge : ContentProvider() {
         }.getOrNull()
     }
 
-    /** Per-uid verdicts, so the certificate walk happens once per caller rather than per call. */
-    private val callerVerdicts = java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
+    /**
+     * Per-uid **positive** verdicts, so the certificate walk happens once per authorised caller
+     * rather than once per call. Rejections are never remembered; [CallerVerdictCache] documents
+     * why that asymmetry is a correctness requirement rather than a missed optimisation.
+     */
+    private val callerVerdicts = CallerVerdictCache()
 
     /**
      * Refuses callers that are not the Understudy install which generated this APK.
@@ -595,20 +601,22 @@ class ProxyFileBridge : ContentProvider() {
      * Why a `signature`-level permission is not enough — this is the reason the check exists:
      *
      * The provider is guarded by `dev.understudy.permission.BRIDGE` at `protectionLevel=
-     * signature`, which the platform grants only when caller and provider share a signing
-     * certificate. In the CI and debug configuration they do, because both APKs are signed with
-     * the committed test key. In production they cannot: this APK is signed with a per-install
-     * key generated on the device, while Understudy is signed at build time with whatever key
-     * distributed it. So a signed release build would install a proxy that refuses every call
-     * from the app that made it — the app would appear broken for a reason no user could
-     * diagnose.
+     * signature`. A signature permission is granted to packages signed like whichever package
+     * DEFINES it, so who defines it decides everything — and it is defined by the Understudy app,
+     * not by this APK. That is deliberate and load-bearing; `proxy/src/main/AndroidManifest.xml`
+     * explains the failure it prevents. The short version: this APK is signed with a per-install
+     * key generated on the device, so had it defined BRIDGE, the app that made it could never
+     * hold it, and the platform would have refused every call at the provider's
+     * `android:permission` gate before a line of this method ran.
      *
-     * The relationship that actually matters is not "same signer as me" but "signed by the
-     * certificate of the app that generated me", and only the generator knows that certificate.
-     * So it bakes the digest in, and we check the caller against it.
+     * With the app as the definer the platform gate opens for the app, and the check below is
+     * what actually pins the caller: not "same signer as me", and not merely "some app signed
+     * with the release key", but "the exact install that generated me". Only the generator knows
+     * its own certificate, so it bakes the digest into this APK and we check callers against it.
      *
-     * The permission is kept: it costs nothing, it keeps the provider closed on builds where the
-     * digest asset is absent, and defence in depth is worth more than elegance here.
+     * The permission is kept as a first gate: it costs nothing, it keeps the provider closed on
+     * builds where the digest asset is absent, and defence in depth is worth more than elegance
+     * here.
      *
      * Fail-closed on a malformed digest, fail-open only when there is no digest at all. A proxy
      * that cannot authenticate its caller must not serve another package's files; a proxy built
@@ -619,13 +627,12 @@ class ProxyFileBridge : ContentProvider() {
         val uid = android.os.Binder.getCallingUid()
         // Our own process, and the platform acting on our behalf.
         if (uid == android.os.Process.myUid() || uid == android.os.Process.SYSTEM_UID) return
-        val cached = callerVerdicts[uid]
-        if (cached != null) {
-            if (cached) return
-            throw SecurityException("caller uid $uid is not the Understudy install that generated this proxy")
-        }
+        if (callerVerdicts.isAuthorised(uid)) return
         val ok = runCatching { matchesGenerator(uid, expected) }.getOrDefault(false)
-        callerVerdicts[uid] = ok
+        // Records only on success. A miss here may be a package-visibility race on this very
+        // first call rather than a genuine mismatch, and remembering it would lock the
+        // legitimate owner out for the lifetime of the process. See CallerVerdictCache.
+        callerVerdicts.record(uid, ok)
         if (!ok) {
             Log.w(TAG, "refusing caller uid $uid: certificate does not match the generator")
             throw SecurityException("caller uid $uid is not the Understudy install that generated this proxy")
@@ -640,25 +647,44 @@ class ProxyFileBridge : ContentProvider() {
      * `SIGNING_CERTIFICATE_MATCHES` check rather than trusting a single reported signer: on a
      * package with rotated keys the platform reports both the current and the originating
      * certificate, and either is acceptable proof of who installed it.
+     *
+     * Every way out is logged with its own reason. "No packages resolved for this uid" and "the
+     * packages resolved but none carry the generator's certificate" are the same `false` to the
+     * caller and completely different situations in the field: the first is usually
+     * package-visibility filtering on a first call (transient — see [CallerVerdictCache]), the
+     * second is a genuine mismatch and will not get better. Guessing between them from a
+     * support report is impossible without this.
      */
     private fun matchesGenerator(uid: Int, expectedDigest: String): Boolean {
         val ctx = context ?: return false
         val pm = ctx.packageManager
-        val packages = pm.getPackagesForUid(uid) ?: return false
+        val packages = runCatching { pm.getPackagesForUid(uid) }.getOrNull()
+        if (packages.isNullOrEmpty()) {
+            Log.w(TAG, "caller uid $uid resolves to no visible packages; this is usually " +
+                "package-visibility filtering and will usually succeed on a retry")
+            return false
+        }
         val md = java.security.MessageDigest.getInstance("SHA-256")
+        var sawCertificates = false
         for (pkg in packages) {
-            val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+            val info = runCatching {
+                pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+            }.getOrNull() ?: continue
             val signing = info.signingInfo ?: continue
             val certs = when {
                 signing.hasMultipleSigners() -> signing.apkContentsSigners
                 else -> signing.signingCertificateHistory
             }
             for (sig in certs ?: emptyArray()) {
+                sawCertificates = true
                 md.reset()
                 val digest = md.digest(sig.toByteArray())
                 if (toHex(digest) == expectedDigest) return true
             }
         }
+        Log.w(TAG, "caller uid $uid (${packages.joinToString()}) presented " +
+            (if (sawCertificates) "a certificate that is not the generator's"
+             else "no signing certificates at all"))
         return false
     }
 

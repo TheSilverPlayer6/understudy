@@ -21,14 +21,30 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!--
-      Required to reach the proxy's exported provider, which is guarded by this signature-level
-      permission. The grant is automatic — no user prompt — *provided both APKs are signed with
-      the same key*, which is why the signing identity has to stay stable across runs.
+      The bridge permission THIS APP defines, at signature level.
 
-      Easy to forget and invisible in unit tests: Robolectric does not enforce permissions, so
-      the bridge works fine on the JVM without this line and then fails with SecurityException on
-      every real device. Caught by the instrumented CI run.
+      Why the app defines it and not the proxy — this is load-bearing and was gotten wrong once:
+      a `signature` permission is granted only to packages signed like whichever package DEFINES
+      it. In production the proxy is signed with a per-install key (SigningIdentity) that can
+      never match this app's build-time key, because the app does not have its own release private
+      key on the device. So if the proxy defined BRIDGE, this app could not hold it, and the
+      platform would refuse every bridge call at the provider's android:permission gate — before
+      ProxyFileBridge.enforceCaller()'s generator-certificate digest check ever ran. The digest
+      fix would be dead code and a signed release would be unable to talk to the proxy it made.
+
+      Defining it here ties the permission to THIS app's certificate, which the caller (this app)
+      trivially matches, so the platform gate opens and the digest check becomes the real pin: it
+      restricts the caller to the exact install that generated the proxy, not merely "some app
+      signed with the release key". The proxy only *requires* BRIDGE on its provider; requiring a
+      permission defined by another package is ordinary Android.
+
+      Easy to forget and invisible in unit tests: Robolectric does not enforce permissions, so the
+      bridge works fine on the JVM without this and then fails with SecurityException on every real
+      device. Caught by the instrumented CI runs (BridgePremiseTest, CallerAuthPremiseTest).
     -->
+    <permission
+        android:name="dev.understudy.permission.BRIDGE"
+        android:protectionLevel="signature" />
     <uses-permission android:name="dev.understudy.permission.BRIDGE" />
 
     <!--
