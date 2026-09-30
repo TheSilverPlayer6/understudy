@@ -121,9 +121,18 @@ sealed class BridgeError(message: String, cause: Throwable? = null) : Exception(
          * unreachable is a discovery problem, denied is a trust problem, and a future build with
          * an actual remedy for one of them will need to tell them apart.
          */
-        fun fromLookup(authority: String, t: Throwable): BridgeError = when (t) {
-            is SecurityException -> PermissionDenied(authority, t)
-            is IllegalArgumentException -> ProxyUnreachable(authority, t)
+        fun fromLookup(authority: String, t: Throwable): BridgeError = when {
+            // A path refusal arrives as a SecurityException too, and means the opposite of a caller
+            // refusal: this one is per-file and the transfer should continue. See
+            // BridgeClient.classifySecurity and BridgeContract.PATH_REJECTION_MARKER.
+            t is SecurityException &&
+                (t.message ?: "").startsWith(BridgeContract.PATH_REJECTION_MARKER) ->
+                RejectedByProxy(
+                    authority,
+                    (t.message ?: "").removePrefix(BridgeContract.PATH_REJECTION_MARKER),
+                )
+            t is SecurityException -> PermissionDenied(authority, t)
+            t is IllegalArgumentException -> ProxyUnreachable(authority, t)
             else -> OperationFailed(
                 "contacting $authority",
                 "${t.javaClass.simpleName}: ${t.message}",

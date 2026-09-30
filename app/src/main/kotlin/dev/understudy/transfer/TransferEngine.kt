@@ -4,7 +4,6 @@ import android.util.Log
 import dev.understudy.bridge.BridgeClient
 import dev.understudy.bridge.BridgeError
 import dev.understudy.core.model.StorageRoot
-import dev.understudy.storage.SafDestination
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -17,9 +16,17 @@ import android.os.ParcelFileDescriptor
  *
  *  - **Stream, never buffer.** Both directions copy through a fixed byte array. A 4 GB `.obb`
  *    must not require 4 GB of RAM, and must not require 4 GB of free space in a temp file.
- *  - **Write-then-swap.** A pull writes to `<name>.part` and only renames once the byte count
- *    matches what the proxy reported. An interrupted transfer therefore leaves the previous
- *    good copy intact rather than a truncated one.
+ *  - **Write-then-swap.** A pull writes to `<name>.part` and only promotes it once the byte
+ *    count matches what the proxy reported. An interrupted *download* therefore leaves the
+ *    previous good copy intact rather than a truncated one.
+ *
+ *    Stated precisely, because the guarantee has a hole and pretending otherwise is how a user
+ *    loses data: SAF has no atomic rename, so promotion is a second pass over the bytes straight
+ *    onto the final name, which truncates it immediately. Dying *during promotion* leaves a
+ *    truncated final file. What still holds — and what `TransferEngineTest` pins — is that the
+ *    truncated file is never mistaken for a good one: its size no longer matches what the proxy
+ *    reported, so the next run re-pulls it, and the `.part` is deleted before every attempt so a
+ *    stale one cannot be promoted. Recovery is guaranteed; atomicity is not, and cannot be.
  *  - **A failure on one file does not abort the rest**, unless it is fatal (proxy gone,
  *    destination gone). The user gets a list at the end rather than a half-copied tree and no
  *    explanation.
@@ -28,7 +35,7 @@ import android.os.ParcelFileDescriptor
  */
 class TransferEngine(
     private val bridge: BridgeClient,
-    private val destination: SafDestination,
+    private val destination: TransferDestination,
     /**
      * When false (the default) a pull skips any destination file that already has the expected
      * size, making interrupted transfers resumable.

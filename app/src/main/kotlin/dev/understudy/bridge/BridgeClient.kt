@@ -95,7 +95,7 @@ class BridgeClient(
         } catch (e: FileNotFoundException) {
             throw BridgeError.NotFound(describe(root, relativePath))
         } catch (e: SecurityException) {
-            throw BridgeError.PermissionDenied(authority, e)
+            throw classifySecurity(describe(root, relativePath), e)
         } catch (e: IllegalArgumentException) {
             throw BridgeError.ProxyUnreachable(authority, e)
         }
@@ -148,7 +148,7 @@ class BridgeClient(
         } catch (e: FileNotFoundException) {
             throw BridgeError.NotFound(describe(root, relativePath))
         } catch (e: SecurityException) {
-            throw BridgeError.PermissionDenied(authority, e)
+            throw classifySecurity(describe(root, relativePath), e)
         } catch (e: IllegalArgumentException) {
             throw BridgeError.ProxyUnreachable(authority, e)
         }
@@ -255,7 +255,7 @@ class BridgeClient(
         val result: Bundle? = try {
             resolver.call(uriForRoot(), method, null, args)
         } catch (e: SecurityException) {
-            throw BridgeError.PermissionDenied(authority, e)
+            throw classifySecurity(method, e)
         } catch (e: IllegalArgumentException) {
             throw BridgeError.ProxyUnreachable(authority, e)
         }
@@ -263,12 +263,38 @@ class BridgeClient(
             throw BridgeError.OperationFailed(method, "provider returned no result")
         }
         if (!result.getBoolean(BridgeContract.KEY_OK, false) && method != BridgeContract.CALL_PING) {
-            throw BridgeError.OperationFailed(
-                method,
-                result.getString(BridgeContract.KEY_ERROR) ?: "unknown reason",
-            )
+            val reason = result.getString(BridgeContract.KEY_ERROR) ?: "unknown reason"
+            // call() carries its errors in the Bundle rather than throwing, so the proxy signals a
+            // path refusal with a flag instead of a message prefix. Same distinction, other channel.
+            if (result.getBoolean(BridgeContract.KEY_PATH_REJECTED, false)) {
+                throw BridgeError.RejectedByProxy(method, reason)
+            }
+            throw BridgeError.OperationFailed(method, reason)
         }
         return result
+    }
+
+    /**
+     * Tells a **path** refusal apart from a **caller** refusal, which arrive identically as a
+     * `SecurityException` across Binder and mean opposite things to the caller of this class.
+     *
+     * `PermissionDenied` means the proxy will not talk to us at all — every subsequent call fails
+     * too, so `TransferEngine` treats it as fatal and stops. `RejectedByProxy` means this one path
+     * is not acceptable — the next file may be fine, so the transfer continues and reports it at
+     * the end. Conflating them made a single symlink inside a save tree abort an entire backup, and
+     * report it as "this is not the Understudy install that generated the proxy", which sends the
+     * user to uninstall and regenerate proxies that were never the problem.
+     *
+     * The marker is stripped before the reason is shown: it is a wire detail, and a user reading
+     * "understudy-path:path escapes root" learns nothing they could act on.
+     */
+    private fun classifySecurity(what: String, e: SecurityException): BridgeError {
+        val message = e.message.orEmpty()
+        return if (message.startsWith(BridgeContract.PATH_REJECTION_MARKER)) {
+            BridgeError.RejectedByProxy(what, message.removePrefix(BridgeContract.PATH_REJECTION_MARKER))
+        } else {
+            BridgeError.PermissionDenied(authority, e)
+        }
     }
 
     private fun expectOk(method: String, args: Bundle, label: String) {

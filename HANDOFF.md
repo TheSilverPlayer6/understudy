@@ -64,7 +64,7 @@ So there are two paths, and the app must tell the user which one they are on:
 gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
         :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  164 unit tests, 0 failures
+  186 unit tests, 0 failures
   app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~699 KB
   lint: 0 errors, 2 warnings (both kept deliberately)
 
@@ -396,6 +396,13 @@ the only place they would ever be needed. Capture now restarts around that phase
 
 Ranked by how much time they cost me.
 
+00. **A `SecurityException` from a provider does not tell you *why*.** `enforceCaller()` refusing the
+   app and `BridgePaths` refusing one path both cross Binder as the same exception type, and
+   `TransferEngine` treats the first as fatal (correctly — every later call would fail too) and the
+   second as one bad file. Conflating them meant a single symlink inside a save tree aborted the
+   whole backup *and* told the user their Understudy install was not the one that generated the
+   proxy. `BridgeContract.PATH_REJECTION_MARKER` separates them on `query`/`openFile`, and
+   `KEY_PATH_REJECTED` does the same inside `call()`'s Bundle, which cannot carry an exception type.
 0. **`Unknown authority` does not mean "not installed".** From API 30 the platform filters package
    visibility, and the filter covers `ContentResolver` authority resolution. An app that cannot
    *see* a provider gets the same `IllegalArgumentException: Unknown authority` it would get if

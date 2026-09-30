@@ -232,6 +232,48 @@ indistinguishable otherwise.
 
 ---
 
+## 3b. The same conflation on the other side of the boundary
+
+Written while testing the transfer engine, and the same class of bug as §3: two different failures
+that cross Binder looking identical, with the difference deciding whether work continues.
+
+`ProxyFileBridge` throws `SecurityException` in two unrelated situations:
+
+* `enforceCaller()` — the calling uid is not the install that generated this proxy. **Fatal**: every
+  subsequent call fails too, so a transfer should stop.
+* `BridgePaths` via `requireOk()` — the *path* asked for is not acceptable. **Not fatal**: the next
+  file may be perfectly fine.
+
+`BridgeClient` mapped both to `BridgeError.PermissionDenied`, and `TransferEngine` treats that as
+fatal. Measured, with one symlink inside the save tree pointing at a real file outside it:
+
+```
+failure path=live-link fatal=true reason=The proxy at '…' refused access: this is not the
+  Understudy install that generated it. … Regenerate and reinstall the proxy.
+```
+
+So a save directory containing one link — which games and launchers create routinely, for shared
+asset directories — aborted the entire backup and told the user their Understudy install was broken
+and that they should uninstall and regenerate every proxy they had. The security property was fine:
+the bytes outside the root were never served. Only the *classification* was wrong, and the
+classification is what the user acts on.
+
+`BridgeContract.PATH_REJECTION_MARKER` separates them. It has to be a string prefix rather than a
+distinct exception type because the two sides cannot share types: `:app` has `:proxy-core` on its
+**test** classpath only, so a custom exception thrown by the proxy would not resolve in the app's
+classloader. `call()` reports errors inside a Bundle rather than by throwing, so it gets the
+structured equivalent, `KEY_PATH_REJECTED`. Both are stripped before a reason is shown to a user.
+
+`PROTOCOL_VERSION` is deliberately **not** bumped: an old proxy without the marker degrades to the
+previous behaviour, and an old app seeing the marker shows it verbatim. Neither breaks, and bumping
+would force every existing proxy to be regenerated for a classification fix.
+
+A footnote worth keeping: the same experiment showed a **dangling** symlink behaves differently and
+was already correct. `File.exists()` follows the link and returns false, so `openFile` throws
+`FileNotFoundException` before the canonical-path check ever matters, and the client reports
+`NotFound` — non-fatal. Two symlink shapes, two different code paths, only one of them broken. That
+is why the suite tests both.
+
 ## 4. What is now pinned, and where
 
 | Invariant | Pinned by | Needs a device? |
@@ -244,6 +286,9 @@ indistinguishable otherwise.
 | negative caller verdicts are never cached | `CallerVerdictCacheTest` (8) | no |
 | the two `BridgeContract` copies agree, `DISCOVERY_ACTION` included | `BridgeIntegrationTest.theTwoCopiesOfTheContractAgree` (reflection over every String/int constant) | no |
 | install failures are explained, including `INSTALL_FAILED_DUPLICATE_PERMISSION` | `InstallFailureDescriptionTest` (12) | no |
+| a **path** refusal is never reported as a **caller** refusal | `TransferEngineTest` (22), both symlink shapes | no |
+| the signing identity loads rather than regenerates, and survives corruption | `SigningIdentityPersistenceTest` (17) | no |
+| write-then-swap, resume, cancellation and per-file isolation | `TransferEngineTest` (22) | no |
 | **two proxies really do coexist on a device** | `run-premise-test.sh`, "confirm both proxies are installed side by side" | **yes** |
 | **the app can really see and reach a proxy** | `BridgePremiseTest.theProxyIsVisibleThroughTheDiscoveryIntentWithoutQueryAllPackages` | **yes** |
 | **the production digest path works against a differently-signed proxy** | `CallerAuthPremiseTest` (2) | **yes** |

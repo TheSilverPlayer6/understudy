@@ -261,7 +261,20 @@ class ProxyFileBridge : ContentProvider() {
         } catch (t: Throwable) {
             Log.w(TAG, "call($method) failed", t)
             out.putBoolean(BridgeContract.KEY_OK, false)
-            out.putString(BridgeContract.KEY_ERROR, "${t.javaClass.simpleName}: ${t.message}")
+            // call() reports errors inside the Bundle rather than by throwing, so the marker cannot
+            // ride along on an exception type here. Set the structured equivalent and strip the
+            // prefix, so a path refusal reaches :app as a per-path failure and not as a dead
+            // bridge — and so the reason it shows a user has no internal prefix in it.
+            val message = t.message.orEmpty()
+            if (t is SecurityException && message.startsWith(BridgeContract.PATH_REJECTION_MARKER)) {
+                out.putBoolean(BridgeContract.KEY_PATH_REJECTED, true)
+                out.putString(
+                    BridgeContract.KEY_ERROR,
+                    message.removePrefix(BridgeContract.PATH_REJECTION_MARKER),
+                )
+            } else {
+                out.putString(BridgeContract.KEY_ERROR, "${t.javaClass.simpleName}: $message")
+            }
         }
         return out
     }
@@ -696,9 +709,20 @@ class ProxyFileBridge : ContentProvider() {
         return sb.toString()
     }
 
+    /**
+     * Resolves [uri] or throws.
+     *
+     * The thrown message carries [BridgeContract.PATH_REJECTION_MARKER], and that prefix is the
+     * only thing distinguishing "this path is not acceptable" from "you are not the install that
+     * generated me" — both cross Binder as a bare `SecurityException`, and `:app` cannot share an
+     * exception type with this module. The distinction decides whether a transfer treats the
+     * failure as one bad file or as a dead bridge; see `BridgeContract.PATH_REJECTION_MARKER`.
+     */
     private fun requireOk(uri: Uri): BridgePaths.Resolution.Ok {
         val r = resolve(uri)
-        if (r is BridgePaths.Resolution.Rejected) throw SecurityException(r.reason)
+        if (r is BridgePaths.Resolution.Rejected) {
+            throw SecurityException(BridgeContract.PATH_REJECTION_MARKER + r.reason)
+        }
         return r as BridgePaths.Resolution.Ok
     }
 

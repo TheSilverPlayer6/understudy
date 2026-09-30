@@ -115,6 +115,23 @@ object BridgeContract {
 
     // ---- result keys -------------------------------------------------------
 
+    /**
+     * Prefix on a `SecurityException` meaning "the PATH you asked for is not acceptable", as
+     * opposed to "you are not the install that generated me".
+     *
+     * `:app` strips it and maps the failure to a per-path error, which `TransferEngine` treats as
+     * one failed file rather than a dead bridge. Without the distinction a single symlink inside a
+     * save tree that points outside it aborts the whole backup, with a message telling the user
+     * their Understudy install is not the one that made the proxy.
+     *
+     * Must equal `:app`'s `BridgeContract.PATH_REJECTION_MARKER`; the two copies are compared by
+     * reflection in `BridgeIntegrationTest.theTwoCopiesOfTheContractAgree`.
+     */
+    const val PATH_REJECTION_MARKER: String = "understudy-path:"
+
+    /** Set on a failed `call()` Bundle when the failure was a rejected path. */
+    const val KEY_PATH_REJECTED: String = "pathRejected"
+
     const val KEY_OK: String = "ok"
     const val KEY_PROTOCOL: String = "protocol"
     const val KEY_PACKAGE: String = "package"

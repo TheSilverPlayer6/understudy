@@ -22,7 +22,7 @@ import androidx.documentfile.provider.DocumentFile
 class SafDestination private constructor(
     private val context: Context,
     val treeUri: Uri,
-) {
+) : dev.understudy.transfer.TransferDestination {
 
     private val root: DocumentFile =
         DocumentFile.fromTreeUri(context, treeUri)
@@ -83,7 +83,7 @@ class SafDestination private constructor(
     }
 
     /** Opens [relativePath] for writing, replacing any existing content. */
-    fun openWrite(relativePath: String): android.os.ParcelFileDescriptor {
+    override fun openWrite(relativePath: String): android.os.ParcelFileDescriptor {
         val file = resolveForWrite(relativePath)
         val uri = file.uri
         // `findFile` + `createFile` cannot truncate, so go through the resolver with "wt".
@@ -92,7 +92,7 @@ class SafDestination private constructor(
     }
 
     /** Opens [relativePath] for reading. Throws [SafError] if it does not exist. */
-    fun openRead(relativePath: String): android.os.ParcelFileDescriptor {
+    override fun openRead(relativePath: String): android.os.ParcelFileDescriptor {
         val segments = splitAndValidate(relativePath)
         var current: DocumentFile? = root
         for (segment in segments.dropLast(1)) {
@@ -111,7 +111,7 @@ class SafDestination private constructor(
      * Used by the transfer engine to decide whether a file is already complete, which is what
      * makes an interrupted pull resumable.
      */
-    fun sizeOf(relativePath: String): Long {
+    override fun sizeOf(relativePath: String): Long {
         val segments = splitAndValidate(relativePath)
         if (segments.isEmpty()) return -1
         var current: DocumentFile? = root
@@ -121,7 +121,7 @@ class SafDestination private constructor(
         return current?.findFile(segments.last())?.length() ?: -1
     }
 
-    fun delete(relativePath: String): Boolean {
+    override fun delete(relativePath: String): Boolean {
         val segments = splitAndValidate(relativePath)
         if (segments.isEmpty()) return false
         var current: DocumentFile? = root
@@ -131,7 +131,7 @@ class SafDestination private constructor(
         return current?.findFile(segments.last())?.delete() == true
     }
 
-    fun exists(relativePath: String): Boolean {
+    override fun exists(relativePath: String): Boolean {
         val segments = splitAndValidate(relativePath)
         var current: DocumentFile? = root
         for (segment in segments) {
