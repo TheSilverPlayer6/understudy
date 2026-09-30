@@ -64,7 +64,7 @@ So there are two paths, and the app must tell the user which one they are on:
 gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
         :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  139 unit tests, 0 failures
+  164 unit tests, 0 failures
   app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~699 KB
   lint: 0 errors, 2 warnings (both kept deliberately)
 
@@ -109,11 +109,11 @@ Section 4 records milestone 4, section 4b records what #28 and #29 turned up, an
 | Package | State | Notes |
 |---|---|---|
 | `packaging/axml` | **done, device-verified** | AXML string-pool codec + `ManifestPatcher`. Re-encoding an unmodified pool is byte-identical to aapt2's output. |
-| `packaging/sign` | **done, verified against apksigner** | DER writer/reader, self-signed X.509 identity, v1 (JAR + hand-built PKCS#7), v2 (signing block, chunked digest, zip surgery). |
+| `packaging/sign` | **done, verified against apksigner** | DER writer/reader, self-signed X.509 identity, v1 (JAR + hand-built PKCS#7), v2 (signing block, chunked digest, zip surgery). `SigningIdentityPersistenceTest` (17) pins the stability every installed proxy depends on, and that the DER our writer emits is byte-identical to the JDK's. |
 | `packaging` | **done** | Aligned `ZipWriter`; `ProxyApkFactory` pipeline. |
 | `proxy-core` | **done** | The proxy's real code as an Android *library*, zero dependencies, so `:app` tests can drive it. Now also holds `CallerVerdictCache` (positive-only verdicts — §4b) and `ProxyDiscoveryReceiver` (the inert component that makes the proxy visible to the app). |
 | `proxy` | **done** | Manifest + dependency on `:proxy-core`; builds the template APK. |
-| `bridge` | **done, Robolectric- and device-verified** | `BridgeClient`, `BridgeError`, contract mirror. `BridgeContract` is duplicated on purpose and compared by reflection, `DISCOVERY_ACTION` included. |
+| `bridge` | **done, Robolectric- and device-verified** | `BridgeClient`, `BridgeError`, contract mirror. `BridgeContract` is duplicated on purpose and compared by reflection, `DISCOVERY_ACTION` included. `BridgeErrorTest` (8) pins the two failure messages, because on a user's device the string *is* the diagnosis. |
 | `install` | **device-verified via CI's adb path; the in-app `PackageInstaller` UX is not** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI installs with `adb install --user`, which proves the *artifacts* install; the session-based flow the app uses is still unexercised. `describe()` — the only explanation a user ever sees on failure — now has 12 tests. There is deliberately **no** `isInstalled()`; see the comment in `ProxyInstaller`. |
 | `core` | **done, 34 tests** | `SessionState`, `SessionManager`. Guards the teardown paths — see `SessionManagerTest`. |
 | `shell` | **done, 14 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. |

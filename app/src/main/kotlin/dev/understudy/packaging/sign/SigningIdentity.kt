@@ -33,12 +33,29 @@ class SigningIdentity private constructor(
     val privateKey: PrivateKey,
     val certificate: X509Certificate,
     /**
-     * The DER of the issuer `Name` exactly as it appears in the certificate.
+     * The DER of the issuer `Name` exactly as it appears in the certificate, outer SEQUENCE tag
+     * and length included.
      *
-     * Kept rather than re-parsed: PKCS#7 `SignerInfo.issuerAndSerialNumber` needs the whole
-     * `Name` SEQUENCE, and `X500Principal.getEncoded()` deliberately omits that outer
-     * wrapper. Deriving it here, where we built it, removes an entire class of ASN.1
-     * walking bugs.
+     * PKCS#7 `SignerInfo.issuerAndSerialNumber` embeds the `Name` verbatim, so this has to be the
+     * whole SEQUENCE and not just its payload. Keeping it here, where we built it, removes an
+     * entire class of ASN.1 walking bugs — which is a real benefit and the reason this field
+     * exists.
+     *
+     * **Correction to the reason previously recorded here.** This used to say that
+     * `X500Principal.getEncoded()` "deliberately omits that outer wrapper", so the field was
+     * presented as the only way to obtain it. Measured on JDK 21, that is false:
+     * `X500Principal("CN=Understudy Test, O=Understudy, C=US").getEncoded()` returns 62 bytes
+     * beginning `0x30 0x3c` — tag SEQUENCE, length 60, payload 60 — and round-trips through the
+     * `X500Principal(byte[])` constructor. The JDK's encoding of a certificate's issuer Name is
+     * therefore the same bytes this field holds, and
+     * `SigningIdentityPersistenceTest.issuerDerIsByteIdenticalToTheJdksEncodingOfTheSameName`
+     * asserts exactly that.
+     *
+     * The field stays. Deriving it once at construction is still cheaper and less error-prone than
+     * reaching through `certificate.issuerX500Principal.encoded` at every signing call, and
+     * `load()` recovering it by walking the certificate is worth pinning either way — a wrong walk
+     * produces a v1 signature every verifier rejects while `keytool` still parses the certificate
+     * happily, so the failure looks like a key problem and is not.
      */
     val issuerDer: ByteArray,
     /** The certificate serial number, big-endian, sign bit included. */

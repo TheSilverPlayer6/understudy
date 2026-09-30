@@ -181,7 +181,7 @@ No `apksigner`, no `zipalign`, no BouncyCastle at runtime.
 
 ## Testing
 
-139 JVM tests, all passing, plus two instrumented suites that run on real Android emulators in
+164 JVM tests, all passing, plus two instrumented suites that run on real Android emulators in
 CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE layer,
 and the second claim is about platform package-visibility and permission rules, and no JVM test can
 reach either.
@@ -199,6 +199,8 @@ reach either.
 | `CallerVerdictCacheTest` (8) | That a **negative** caller verdict is never cached. `enforceCaller()` authenticates through `PackageManager`, which is visibility-filtered, and a caller only becomes visible because it accessed our provider — bookkeeping that is posted to a handler, so the first call can race it. A cached miss would lock the legitimate owner out for the life of the process. |
 | `InstallFailureDescriptionTest` (12) | `InstallResultReceiver.describe()`, the only explanation a user ever sees when an install fails: that `UPDATE_INCOMPATIBLE` says package identity is device-wide so another profile will not help, that `DUPLICATE_PERMISSION` names the permission and says to remove the stale proxy, that a declined prompt is not dressed up as a conflict, and that an unmapped failure keeps the platform's raw text. |
 | `ProdSignedProxyTest` (1) | Generates the artifact CI uses for the **production** key layout: signed with a fresh random key (never the app's) and carrying the SHA-256 of the app's certificate. Skips loudly rather than silently if either input is missing. |
+| `SigningIdentityPersistenceTest` (17) | The signing identity's **stability**, which every proxy this install ever made depends on: a second `loadOrCreate` loads rather than regenerates; a corrupt or truncated key or certificate regenerates instead of bricking; the loaded private key signs what the persisted certificate verifies. Also checks the DER we emit against the JDK's own X.509 parser as an independent oracle — `issuerDer` is byte-identical to `X500Principal.getEncoded()`, which disproved the claim recorded in that field's KDoc. |
+| `BridgeErrorTest` (8) | The two failure messages a user has to act on. Both were wrong before milestone 5 in the most expensive way — confidently naming a cause that could not be the one — and on a user's device the string *is* the diagnosis, since there is no logcat to attach. |
 | `ProxyApkFactoryTest` (6) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, that two targets differ only in identity, and that the generator's certificate digest is baked in at the path the proxy reads **and covered by the v1 signature**. Writes a sample APK for external verification. |
 
 On a real emulator (API 34 and 35, KVM, `target: default` so `adb root` works),
