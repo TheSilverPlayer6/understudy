@@ -6,15 +6,17 @@ import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.Until
 import dev.understudy.bridge.BridgeClient
 import dev.understudy.core.model.BridgeInfo
 import dev.understudy.install.ApkGenerator
 import dev.understudy.install.InstallResultReceiver
 import dev.understudy.install.PendingInstall
 import dev.understudy.install.ProxyInstaller
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -26,38 +28,44 @@ import org.junit.runner.RunWith
 /**
  * The **in-app install path**, on a device — HANDOFF §3.4.
  *
- * Everything CI proved about installation so far went through `adb install --user N`: that
- * pins the *artifacts* (a generated proxy is a valid, installable APK) but exercises none of
- * the machinery the app actually uses — `PackageInstaller` session staging from inside the
- * profile, the `REQUEST_INSTALL_PACKAGES` appop (which is per-user, and which the UI must
- * detect and route to Settings), the commit→broadcast round trip through
- * [InstallResultReceiver], and the session bookkeeping ([ProxyInstaller.stage]/abandon).
+ * Everything CI proved about installation before this test went through `adb install --user N`:
+ * that pins the *artifacts* but exercises none of the machinery the app itself uses —
+ * `PackageInstaller` session staging from inside the profile, the per-user
+ * `REQUEST_INSTALL_PACKAGES` appop, the commit→broadcast round trip through
+ * [InstallResultReceiver], and the session bookkeeping. This test walks the production path
+ * with the real classes: [ApkGenerator] builds the proxy from the committed template with the
+ * app's own per-install identity, [ProxyInstaller] stages and commits it, the results arrive on
+ * the real receiver, and — the part that closes the circle — the freshly installed proxy
+ * answers a `ping` through [BridgeClient], proving the app can also *see* the package it
+ * installed (installer-of-record visibility, a different AppsFilter path from the `<queries>`
+ * discovery the other suites pin).
  *
- * This test walks the production path end to end with the real classes: [ApkGenerator] builds
- * the proxy from the committed template with the app's own per-install [dev.understudy.packaging.sign.SigningIdentity],
- * [ProxyInstaller] stages and commits it, the result arrives on the real receiver, and — the
- * part that closes the circle — the freshly installed proxy answers a `ping` through
- * [BridgeClient], proving the app can also *see* the package it installed (installer-of-record
- * visibility, a different AppsFilter path from the `<queries>` discovery the other suites pin).
+ * **The confirmation dialog is part of the flow, and run #50 is the evidence.** The first
+ * version of this test asserted that a granted `REQUEST_INSTALL_PACKAGES` appop makes the
+ * commit silent. Measured on API 35/36 AOSP: `canRequestInstalls=true`, and the platform still
+ * answered `STATUS_PENDING_USER_ACTION` with a `CONFIRM_INSTALL` intent — per-install
+ * confirmation is simply not skippable for a non-privileged installer, on any current build.
+ * That matches how [dev.understudy.core.SessionManager] already models the flow
+ * (`Installing(awaitingUser = true)`, the confirmation intent handed to the UI). So this test
+ * now drives the whole truth: commit → PENDING_USER_ACTION → launch the confirmation → tap
+ * Install (UiAutomator, because CI has no thumb) → SUCCESS broadcast → provider answers.
+ * A platform that ever DOES commit silently is handled too: the first outcome is simply
+ * Success and the dialog phase is skipped.
+ *
+ * Not covered here, deliberately: the *uninstall* half. `PackageInstaller.uninstall` also
+ * routes through a dialog, and the proxy's `hasFragileUserData` guarantees one (to offer
+ * "Keep app data") — but unlike install there is no programmatic tap that makes it faithful,
+ * and the data-keeping uninstall is already asserted via `pm uninstall -k` in teardown.
  *
  * Preconditions the CI orchestration provides (`.github/scripts/run-premise-test.sh`):
- *  - the app under test is installed for this user (it is: this runs inside it);
- *  - `appops set --user N <app> REQUEST_INSTALL_PACKAGES allow` — on a real device the user
- *    grants this from the profile's own Settings; granting the appop from the shell is the
- *    automatable equivalent, and `canRequestInstalls()` below asserts it took. With the appop
- *    granted the platform commits without a confirmation dialog; if a future build starts
- *    answering with STATUS_PENDING_USER_ACTION anyway, this test fails saying exactly that,
- *    because there is no user here to tap.
- *
- * Not covered here, deliberately: the *uninstall* half. `PackageInstaller.uninstall` always
- * routes through a confirmation dialog (and the proxy's `hasFragileUserData` guarantees one,
- * to offer "Keep app data"), which has no headless path; the CI script asserts the data-keeping
- * uninstall via `pm uninstall -k` instead, and the in-app dialog flow needs a human or an
- * OEM-free UI automation rig.
+ *  - the app under test is installed for this user (this runs inside it);
+ *  - `appops set --user N <app> REQUEST_INSTALL_PACKAGES allow` — the automatable equivalent
+ *    of the per-profile Settings toggle a real user performs; asserted below so a missing
+ *    grant is named rather than surfacing as an opaque commit failure.
  *
  * Arguments:
- *  - `installerTargetPackage` (required) — package name the proxy will impersonate; distinct
- *    from the other phases' targets so all three proxies coexist
+ *  - `installerTargetPackage` (required) — package name the proxy impersonates; distinct from
+ *    the other phases' targets so all proxies coexist
  *  - `userId` (optional) — expected profile, cross-checked against the ping
  */
 @RunWith(AndroidJUnit4::class)
@@ -80,9 +88,8 @@ class InstallerSessionPremiseTest {
 
     @Test
     fun theAppCanInstallItsOwnProxyThroughASessionAndReachIt() {
-        // 0. The per-user appop. Asserted rather than assumed: without it the platform either
-        //    refuses the commit or demands a confirmation nobody is here to give, and both
-        //    outcomes must be attributed to the grant, not to the session code.
+        // 0. The per-user appop. Asserted rather than assumed: without it the commit fails in a
+        //    different way (blocked/abandoned), and that difference must be attributable.
         val canInstall = installer.canRequestInstalls()
         println("INSTALLER-DIAG canRequestInstalls=$canInstall user=${installer.currentUserId} target=$target")
         assertTrue(
@@ -99,15 +106,11 @@ class InstallerSessionPremiseTest {
             "package=${generated.packageName}")
         assertTrue(generated.file.isFile && generated.file.length() > 0, "generated APK is empty")
 
-        // 2. Stage + commit, with the result routed through the real receiver. The custom
-        //    extra mirrors what the app's own PendingIntent carries so the outcome can be
-        //    correlated to the target.
-        val latch = CountDownLatch(1)
-        val outcomeRef = AtomicReference<InstallResultReceiver.Outcome?>(null)
-        InstallResultReceiver.listener = { o ->
-            outcomeRef.set(o)
-            latch.countDown()
-        }
+        // 2. Stage + commit. Outcomes arrive on the real receiver; a queue rather than a latch
+        //    because the honest flow delivers TWO: PENDING_USER_ACTION now, SUCCESS after the
+        //    confirmation. (The platform reuses the commit's IntentSender for the final result.)
+        val outcomes = LinkedBlockingQueue<InstallResultReceiver.Outcome>()
+        InstallResultReceiver.listener = { outcomes.offer(it) }
         val pending = PendingIntent.getBroadcast(
             context,
             0x15E55,
@@ -118,37 +121,83 @@ class InstallerSessionPremiseTest {
         val staged = installer.stage(generated.file, target, pending)
         println("INSTALLER-DIAG staged session=${staged.sessionId}")
 
-        // 3. Await the broadcast. 90 s: a session commit on a busy emulator with dexopt ahead
-        //    of it is not instant, and a false timeout here reads as a product failure.
-        val arrived = latch.await(90, TimeUnit.SECONDS)
-        InstallResultReceiver.listener = null
-        if (!arrived) {
-            val sessions = installer.mySessions().joinToString { "${it.sessionId}:${it.isActive}" }
+        // 3. First outcome. 90 s: a commit on a busy emulator with dexopt ahead of it is not
+        //    instant, and a false timeout here reads as a product failure.
+        val first = outcomes.poll(90, TimeUnit.SECONDS)
+        if (first == null) {
+            InstallResultReceiver.listener = null
+            val sessions = installer.mySessions().joinToString { "${it.sessionId}:active=${it.isActive}" }
             throw AssertionError(
-                "no install result arrived within 90 s. Sessions still open: [$sessions]. " +
-                    "If logcat shows the confirmation UI, the appop grant did not make the " +
-                    "commit silent on this build.",
+                "no install result arrived within 90 s of commit. Sessions still open: " +
+                    "[$sessions]. Nothing was delivered to the receiver at all.",
             )
         }
-        val result = outcomeRef.get()
-        println("INSTALLER-DIAG outcome=$result")
+        println("INSTALLER-DIAG first outcome=$first")
 
-        // 4. The verdict. NeedsConfirmation is reported as its own failure: it means the
-        //    platform wanted a human despite the grant — a real finding about this API level,
-        //    not a flake to retry.
-        val success = when (result) {
-            is InstallResultReceiver.Outcome.Success -> result
-            is InstallResultReceiver.Outcome.NeedsConfirmation -> throw AssertionError(
-                "STATUS_PENDING_USER_ACTION despite REQUEST_INSTALL_PACKAGES being granted — " +
-                    "on this build a session commit is never silent, so the in-app install flow " +
-                    "always needs the confirmation UI. session=${result.sessionId}",
-            )
-            is InstallResultReceiver.Outcome.Failure -> throw AssertionError(
-                "session install failed: status=${result.status} reason=${result.reason}",
-            )
-            null -> throw AssertionError("the receiver fired but delivered no outcome")
+        // 4. The confirmation dance — the flow every real user goes through.
+        val success = when (first) {
+            is InstallResultReceiver.Outcome.Success -> first
+            is InstallResultReceiver.Outcome.Failure -> {
+                InstallResultReceiver.listener = null
+                throw AssertionError(
+                    "session install failed before any confirmation: status=${first.status} " +
+                        "reason=${first.reason}",
+                )
+            }
+            is InstallResultReceiver.Outcome.NeedsConfirmation -> {
+                val confirmation = first.confirmation
+                assertNotNull(
+                    confirmation,
+                    "STATUS_PENDING_USER_ACTION arrived without the confirmation Intent — the " +
+                        "receiver could not have forwarded what the platform did not include.",
+                )
+                println("INSTALLER-DIAG launching confirmation: $confirmation")
+                confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(confirmation)
+
+                // The platform's dialog, tapped by the test. Button text is matched exactly
+                // ("Install", en-US AOSP/google_apis images); anything else dumps the visible
+                // hierarchy into the log before failing, so a wording change is diagnosable
+                // from the artifact rather than from a timeout.
+                val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+                val installButton = device.wait(
+                    Until.findObject(By.text("Install")),
+                    CONFIRMATION_TIMEOUT_MS,
+                )
+                if (installButton == null) {
+                    println("INSTALLER-DIAG confirmation window hierarchy dump follows")
+                    val dumpFile = java.io.File(context.cacheDir, "installer-hierarchy.xml")
+                    runCatching {
+                        device.dumpWindowHierarchy(dumpFile)
+                        println(dumpFile.readText().take(8_000))
+                    }.onFailure { println("INSTALLER-DIAG hierarchy dump failed: $it") }
+                    dumpFile.delete()
+                    InstallResultReceiver.listener = null
+                    throw AssertionError(
+                        "the install-confirmation dialog did not show an 'Install' button " +
+                            "within ${CONFIRMATION_TIMEOUT_MS / 1000}s of launching $confirmation.",
+                    )
+                }
+                installButton.click()
+                println("INSTALLER-DIAG tapped Install; waiting for the final outcome")
+
+                val second = outcomes.poll(90, TimeUnit.SECONDS)
+                InstallResultReceiver.listener = null
+                when (second) {
+                    is InstallResultReceiver.Outcome.Success -> second
+                    is InstallResultReceiver.Outcome.Failure -> throw AssertionError(
+                        "session install failed AFTER confirmation: status=${second.status} " +
+                            "reason=${second.reason}",
+                    )
+                    else -> throw AssertionError(
+                        "no final outcome within 90 s of tapping Install (got: $second)",
+                    )
+                }
+            }
         }
-        assertEquals(target, success.packageName)
+        InstallResultReceiver.listener = null
+        println("INSTALLER-DIAG final outcome=$success")
+        assertEquals(target, success.packageName, "the SUCCESS broadcast named a different package")
 
         // 5. Installed AND visible to us: getPackageInfo through the app's own resolver. The
         //    app is the installer of record, which is its own AppsFilter visibility path —
@@ -187,6 +236,11 @@ class InstallerSessionPremiseTest {
         if (expectedUser >= 0) {
             assertEquals(expectedUser, answered.userId, "proxy is not in the requested profile")
         }
-        println("INSTALLER-SESSION VERIFIED: staged, committed, broadcast received, bridge answered")
+        println("INSTALLER-SESSION VERIFIED: staged, committed, confirmed, SUCCESS received, " +
+            "bridge answered — the production install path, end to end")
+    }
+
+    private companion object {
+        const val CONFIRMATION_TIMEOUT_MS = 20_000L
     }
 }

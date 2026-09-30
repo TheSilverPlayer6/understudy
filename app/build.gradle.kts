@@ -398,6 +398,8 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.test.junit)
+    // For the confirmation-dialog tap in InstallerSessionPremiseTest — see the catalog comment.
+    androidTestImplementation(libs.androidx.test.uiautomator)
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.kotlin.test)
     androidTestImplementation(libs.kotlinx.coroutines.test)

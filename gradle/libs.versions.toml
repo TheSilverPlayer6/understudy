@@ -14,6 +14,7 @@ androidxTestCore = "1.7.0"
 androidxTestRunner = "1.7.0"
 androidxTestRules = "1.7.0"
 androidxTestJunit = "1.3.0"
+androidxUiautomator = "2.3.0"
 espresso = "3.7.0"
 robolectric = "4.17"
 turbine = "1.2.1"
@@ -48,6 +49,12 @@ androidx-test-core-ktx = { module = "androidx.test:core-ktx", version.ref = "and
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
 androidx-test-rules = { module = "androidx.test:rules", version.ref = "androidxTestRules" }
 androidx-test-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestJunit" }
+# The installer-session test drives the platform's install-confirmation dialog, because
+# run #50 measured what the theory got wrong: with REQUEST_INSTALL_PACKAGES granted, a plain
+# app's session commit STILL answers STATUS_PENDING_USER_ACTION — per-install confirmation is
+# not skippable for non-privileged installers. Tapping the dialog is part of the flow under
+# test, so the test taps it.
+androidx-test-uiautomator = { module = "androidx.test.uiautomator:uiautomator", version.ref = "androidxUiautomator" }
 espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
