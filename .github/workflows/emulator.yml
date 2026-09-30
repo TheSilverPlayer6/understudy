@@ -192,7 +192,7 @@ jobs:
             allow-no-root: 0
             experimental: false
             boot-timeout: 1200
-            extra-emulator-options: ""
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -202,7 +202,7 @@ jobs:
             allow-no-root: 0
             experimental: false
             boot-timeout: 1200
-            extra-emulator-options: ""
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -212,7 +212,7 @@ jobs:
             allow-no-root: 1
             experimental: false
             boot-timeout: 1200
-            extra-emulator-options: ""
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -240,7 +240,15 @@ jobs:
             allow-no-root: 1
             experimental: true
             boot-timeout: 900
-            extra-emulator-options: -show-kernel
+            # ANGLE rather than the SwiftShader GLES translator. Run #43: surfaceflinger took
+            # SIGABRT in a loop (t=32s, 52s, 69s, 86s), each abort taking zygote and system_server
+            # with it, so `pm create-user` got Broken pipe forever. The emulator reported
+            # `vulkan_mode_selected:swiftshader gles_mode_selected:swiftshader` and then never
+            # reached the "Selecting Vulkan device" line that API 34 prints, which points at the
+            # graphics stack rather than at anything this project does. One variable at a time:
+            # only this job changes backend, and `-show-kernel` stays on so the next log says
+            # something whether or not this is the fix.
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu angle_indirect -show-kernel
             ram-size: 4096M
             disk-size: 6144M
             cores: 4
@@ -365,7 +373,9 @@ jobs:
           # No snapshot: a restored one could carry a user profile or an install over from a
           # previous attempt and make a failing step look like it succeeded.
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect ${{ matrix.extra-emulator-options }}
+          # Fully per-matrix, because the GPU backend is now the variable under test on API 37 and
+          # must not move for the three jobs that pass.
+          emulator-options: ${{ matrix.emulator-options }}
           script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
         env:
           # 0 for the AOSP jobs, so losing root fails the run loudly instead of silently degrading

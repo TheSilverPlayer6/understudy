@@ -166,6 +166,8 @@ await_framework() {
     sleep 5
   done
   echo "!! await_framework($label): the package manager never answered in 300 s."
+  echo "-- what the framework said before it stopped answering --"
+  adb logcat -d -b crash 2>/dev/null | tail -60 || true
   adb shell getprop sys.boot_completed 2>&1 || true
   adb shell getprop init.svc.zygote 2>&1 || true
   adb shell getprop init.svc.surfaceflinger 2>&1 || true
@@ -193,8 +195,31 @@ adb_fw() {
   return $rc
 }
 
+# dump_guest_crashes <label> — the guest's own account of why it is unhappy.
+#
+# Added because `-show-kernel` answered "is the kernel panicking?" (no) and "which service is
+# dying?" (surfaceflinger, SIGABRT, in a loop) but not "why". The abort message lives in the crash
+# logcat buffer and in a tombstone, neither of which reaches the serial console, and by the time a
+# human reads the job log the emulator is gone. Both are cheap to capture and empty when nothing
+# crashed, so this runs unconditionally rather than only on a failure path.
+dump_guest_crashes() {
+  local label="${1:-unlabelled}"
+  echo "-- guest crash buffer ($label) --"
+  adb logcat -d -b crash 2>/dev/null | tail -80 || echo "  (crash buffer unavailable)"
+  echo "-- guest tombstones ($label) --"
+  adb shell 'ls -1t /data/tombstones 2>/dev/null | head -3' 2>/dev/null || true
+  adb shell 'T=$(ls -1t /data/tombstones/tombstone_* 2>/dev/null | head -1); [ -n "$T" ] && head -60 "$T"' 2>/dev/null \
+    || echo "  (no tombstone readable)"
+  echo "-- which services are up ($label) --"
+  adb shell 'getprop | grep -E "^\[init\.svc\.(zygote|surfaceflinger|system_server|bootanim)\]"' 2>/dev/null || true
+}
+
 log "wait for the framework to be usable, not merely booted"
-await_framework "initial" || exit 1
+dump_guest_crashes "after boot"
+if ! await_framework "initial"; then
+  dump_guest_crashes "framework never came up"
+  exit 1
+fi
 echo "framework answered:"
 adb shell pm list users 2>&1 || true
 
