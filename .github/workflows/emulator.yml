@@ -773,10 +773,15 @@ jobs:
         run: |
           set -euo pipefail
           # -Punderstudy.testBuildType=release makes the androidTest variant target (and be
-          # signed like) the release build. Without keystore.properties being picked up, the
-          # output would be app-release-UNSIGNED.apk and the find below would come back empty —
-          # a loud failure, which is the point of asserting on names below.
-          ./gradlew --no-daemon --console=plain -Punderstudy.testBuildType=release \
+          # signed like) the release build. -Punderstudy.keepTestRuntime adds the CI-only R8
+          # keeps (app/proguard-test-runtime-keeps.pro) without which the instrumented process
+          # dies on stdlib members the tests use and the shaken app does not — measured twice
+          # on device (runs #49, #53). Operator builds pass neither property. Without
+          # keystore.properties being picked up, the output would be app-release-UNSIGNED.apk
+          # and the find below would come back empty — a loud failure, which is the point of
+          # asserting on names below.
+          ./gradlew --no-daemon --console=plain \
+            -Punderstudy.testBuildType=release -Punderstudy.keepTestRuntime=true \
             :app:assembleRelease :app:assembleReleaseAndroidTest
           ls -l app/build/outputs/apk/release/ app/build/outputs/apk/androidTest/release/
           test -f app/build/outputs/apk/release/app-release.apk \

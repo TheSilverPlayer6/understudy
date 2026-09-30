@@ -91,6 +91,18 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // CI-only: the release-E2E job instruments this build, and the instrumented
+            // process shares a combined classloader whose test side has no stdlib of its own
+            // (AGP gives androidTest the app's runtime classpath as *provided*). Members the
+            // tests use and the app does not would be shaken out from under them — measured
+            // twice on device (runs #49 and #53; see the file's header for the anatomy).
+            // Operator builds never set this property and ship fully shaken. Presence check,
+            // NOT isNotBlank: a bare -Punderstudy.keepTestRuntime arrives as the empty string,
+            // and the first version of this condition silently ignored it — caught because the
+            // "kept" build came out byte-identical in size to the unkept one.
+            if (providers.gradleProperty("understudy.keepTestRuntime").orNull != null) {
+                proguardFiles("proguard-test-runtime-keeps.pro")
+            }
             // Applied when the androidTest variant is minified, which AGP does whenever it
             // targets a minified build type (testBuildType=release). Without these the R8 run
             // for the instrument dies on androidx.test's compile-only errorprone references,

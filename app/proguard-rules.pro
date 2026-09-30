@@ -47,17 +47,20 @@
 
 # ---- instrumented tests link against the minified release app ----------------------------
 # The release-E2E CI job (`premise-release` in emulator.yml) runs BridgePremiseTest,
-# CallerAuthPremiseTest and InstallerSessionPremiseTest against the R8-minified release APK.
-# The test APK compiles against unobfuscated symbols and is itself only kept by name (see
-# proguard-test-rules.pro), so every app class the tests reference must keep its name or the
-# suite dies with NoClassDefFoundError at runtime — a failure that would look like a product
-# regression. These packages are exactly the surface the tests touch (BridgeClient /
-# BridgeError / StorageRoot / ApkGenerator / ProxyInstaller / InstallResultReceiver), and all
-# three are cross-process or system-facing contract types where a stable name keeps stack
-# traces in bug reports readable anyway.
+# CallerAuthPremiseTest, InstallerSessionPremiseTest and TransferDeathPremiseTest against the
+# R8-minified release APK. The test APK compiles against unobfuscated symbols and is itself
+# only kept by name (see proguard-test-rules.pro), so every app class the tests reference must
+# keep its name or the suite dies with NoClassDefFoundError at runtime — a failure that would
+# look like a product regression. These packages are exactly the surface the tests touch
+# (BridgeClient / BridgeError / StorageRoot / ApkGenerator / ProxyInstaller /
+# InstallResultReceiver / TransferEngine / TransferJournal), and all four are cross-process,
+# system-facing or persistence-contract types where a stable name keeps stack traces in bug
+# reports readable anyway. The stdlib/coroutines half of the same problem is bigger and gets
+# its own CI-only file — see proguard-test-runtime-keeps.pro.
 -keep class dev.understudy.bridge.** { *; }
 -keep class dev.understudy.core.model.** { *; }
 -keep class dev.understudy.install.** { *; }
+-keep class dev.understudy.transfer.** { *; }
 
 # androidx.tracing must survive in the APP for the release instrument to start at all.
 # AndroidJUnitRunner.onCreate calls Trace.beginSection, and the runner resolves it through the
