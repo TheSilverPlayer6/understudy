@@ -118,10 +118,28 @@ class ProxyInstaller(private val context: Context) {
         installer.uninstall(packageName, resultIntent.intentSender)
     }
 
-    /** True when [packageName] appears to be installed for this user. */
-    fun isInstalled(packageName: String): Boolean = runCatching {
-        context.packageManager.getPackageInfo(packageName, 0)
-    }.isSuccess
+    // NOTE: there is deliberately no `isInstalled(packageName)` here.
+    //
+    // One existed, was never called, and was wrong twice over — which is worth recording because
+    // it is the obvious thing for the next person to add back:
+    //
+    //   fun isInstalled(pkg: String) = runCatching { pm.getPackageInfo(pkg, 0) }.isSuccess
+    //
+    //  1. `getPackageInfo` is one of the APIs the docs name as subject to **package-visibility
+    //     filtering** from API 30, and this proxy is not automatically visible to us: nothing in
+    //     the platform's automatic-visibility list covers "an app whose provider I queried". So
+    //     an installed proxy can report as absent, and the failure is silent — `runCatching` turns
+    //     `NameNotFoundException` into `false`, which is indistinguishable from "not installed".
+    //     The tempting fix, `QUERY_ALL_PACKAGES`, is Play-restricted and unnecessary.
+    //  2. Even a truthful answer would be the wrong question. "Is the package installed?" is not
+    //     what any caller needs; "can I reach the bridge?" is. `BridgeClient.ping()` answers that
+    //     and is strictly stronger: it proves the provider is live, the signature-level
+    //     permission is granted, the protocol version matches, and the proxy is running in the
+    //     profile we asked for. An installed proxy that fails any of those is not usable, and a
+    //     boolean that says "installed" would send the orchestrator down a path that then fails
+    //     with a less informative error.
+    //
+    // Presence is therefore determined by calling the provider. See BridgeClient.ping.
 
     companion object {
         private const val ENTRY_NAME = "proxy.apk"
