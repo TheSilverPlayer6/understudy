@@ -38,20 +38,50 @@ echo "api=$API target=$TARGET_PKG app=$APP_PKG"
 # `adb root` makes later steps easier but is unavailable on google_apis images; shell already
 # runs as uid 2000 in the shell_data_file SELinux domain, which is what actually matters for
 # writing inside another user's Android/data.
-log "adb root (best effort)"
+log "adb root (retried — it is not best effort, the suite needs it)"
 # Root decides how we can plant fixture bytes. On a userdebug/eng image (`target: default`, i.e.
 # AOSP) `adb root` succeeds and we can write to /data/media/<user> — the *raw* storage that sits
-# underneath the FUSE view. On a production-signed google_apis image it fails, and uid 2000 has
-# no access to another user's emulated storage at all, which is what produced
+# underneath the FUSE view. On a production-signed google_apis image it genuinely cannot, and
+# uid 2000 has no access to another user's emulated storage at all, which is what produced
 # "mkdir: '/storage/emulated/10': Permission denied".
-if adb root >/dev/null 2>&1; then
+#
+# RETRIED, because this is a flake source and not a rare one. Run #30's API 35 job lost the whole
+# run here: `adb root` returned non-zero on the first and only attempt even though the image was
+# `target: default` and runs #18 and #29 had rooted the same image fine. `adb root` restarts adbd,
+# which drops the connection, and the emulator-runner's own `logcat -G` call in the same window
+# reported "device 'emulator-5554' not found" — the device was mid-reconnect. One transient
+# failure therefore looked exactly like a production-signed image, and the message said so.
+#
+# So: retry, wait for the device between attempts, and only then draw a conclusion. The wording
+# below no longer asserts a cause it has not established.
+HAVE_ROOT=0
+for attempt in 1 2 3 4 5 6; do
   adb wait-for-device
-  HAVE_ROOT=1
-  echo "adb root succeeded: uid=$(adb shell id -u 2>/dev/null || echo '?')"
-else
-  HAVE_ROOT=0
-  adb wait-for-device
-  echo "adb root unavailable (production-signed image); planting will need a fallback"
+  if out="$(adb root 2>&1)"; then
+    adb wait-for-device
+    # `adb root` exits 0 for "adbd is already running as root" too, so confirm rather than trust.
+    if [ "$(adb shell id -u 2>/dev/null | tr -d '\r')" = "0" ]; then
+      HAVE_ROOT=1
+      echo "adb root succeeded on attempt $attempt: uid=0 ($out)"
+      break
+    fi
+    echo "adb root returned 0 but id -u is $(adb shell id -u 2>&1 | tr -d '\r'); attempt $attempt"
+  else
+    echo "adb root attempt $attempt failed: $out"
+  fi
+  sleep 5
+done
+if [ "$HAVE_ROOT" != "1" ]; then
+  echo "!! could not obtain root after 6 attempts."
+  echo "   Either the image is production-signed (it should not be — the workflow pins"
+  echo "   target: default) or the emulator never settled. Planting fixture bytes into another"
+  echo "   user's private storage needs uid 0: uid 2000 is exempt from the FUSE filter only"
+  echo "   within its own mount namespace, and even root is refused the FUSE view of another"
+  echo "   user (run #11), so /data/media/$USER_ID is the only route."
+  adb shell getprop ro.build.type
+  adb shell getprop ro.build.tags
+  adb shell getprop ro.debuggable
+  adb shell id
 fi
 # RAW_BASE is computed after the user exists; see the planting step.
 
@@ -247,6 +277,9 @@ if [ "$HAVE_ROOT" = "1" ]; then
   if plant "$RAW_BASE"; then PLANTED_BASE="$RAW_BASE"; fi
 fi
 if [ -z "$PLANTED_BASE" ]; then
+  # Attempted even though it has never worked, because "never worked" is an observation and not a
+  # guarantee: if some image ever does let uid 2000 or uid 0 reach another user's FUSE view, this
+  # is what would find out, and the suite would keep working instead of dying on a missing root.
   echo "-- trying the FUSE view (/storage/emulated/$USER_ID) --"
   if plant "/storage/emulated/$USER_ID"; then PLANTED_BASE="/storage/emulated/$USER_ID"; fi
 fi
@@ -475,6 +508,16 @@ log "run the PRODUCTION caller-auth premise test as user $USER_ID"
 # path works AND that BRIDGE is defined by the app (so the differently-signed caller can hold it);
 # a permission SecurityException here means the proxy still defines BRIDGE and the platform gate
 # fires before the proxy's own digest check ever runs.
+# Restart logcat for this phase. The capture above was killed after the FUSE premise ran, and
+# `CALLERAUTH-DIAG` is printed with System.out, which lands in logcat rather than in the
+# `am instrument` transcript. Run #30 passed this phase and still reported
+# "(no CALLERAUTH-DIAG lines found)" — so the diagnostics that exist precisely to explain a
+# failure would have been absent in the one run where they mattered.
+adb logcat -c 2>/dev/null || true
+adb logcat -v time > premise-logs/callerauth-logcat.log 2>&1 &
+CALLERAUTH_LOGCAT_PID=$!
+sleep 1
+
 set +e
 adb shell am instrument -w --user "$USER_ID" \
   -e prodTargetPackage "$PRODSIGN_PKG" \
@@ -485,10 +528,17 @@ CALLERAUTH_EXIT="${PIPESTATUS[0]}"
 set -e
 log "caller-auth instrument exit=$CALLERAUTH_EXIT"
 sleep 2
+kill "$CALLERAUTH_LOGCAT_PID" 2>/dev/null || true
+wait "$CALLERAUTH_LOGCAT_PID" 2>/dev/null || true
 
 log "caller-auth diagnostics (which gate produced any failure)"
-grep -hE "CALLERAUTH-DIAG" premise-logs/callerauth-instrument.log premise-logs/logcat.log 2>/dev/null \
-  | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -40 || echo "(no CALLERAUTH-DIAG lines found)"
+grep -hE "CALLERAUTH-DIAG|UnderstudyBridge" \
+  premise-logs/callerauth-instrument.log premise-logs/callerauth-logcat.log 2>/dev/null \
+  | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -60 || echo "(no CALLERAUTH-DIAG lines found)"
+
+log "confirm both proxies are still installed after the caller-auth phase"
+# A phase that ends by breaking the other proxy would be a very confusing way to fail later.
+adb shell pm list packages --user "$USER_ID" | grep -E "$TARGET_PKG|$PRODSIGN_PKG" || true
 
 if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/callerauth-instrument.log; then
   echo "!! production caller-auth test reported failures"
