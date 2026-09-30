@@ -129,49 +129,80 @@ BANNER
 fi
 # RAW_BASE is computed after the user exists; see the planting step.
 
-log "wait for the framework to be usable, not merely booted"
-# `sys.boot_completed=1` is what the emulator action waits for, and it is not sufficient. Run #41
-# on API 37: the guest reached system_server, the action proceeded, and at t=72s surfaceflinger
-# crashed — `init: Sending SIGKILL to service 'zygote'`, `crash_dump64`, system_server reaped. The
-# script was already running, so `pm create-user` hit a dying binder and came back with
-# "cmd: Failure calling service package: Broken pipe (32)".
+# --------------------------------------------------------------------------------------------
+# Waiting for a framework that stays up.
 #
-# A framework restart during boot is a property of a software-rendered emulator on a 2-vCPU runner,
-# not of this project, and it can happen on any image. So poll until the package manager actually
-# answers, and only then continue.
+# `sys.boot_completed=1` — what the emulator action waits for — is not the same claim as "the
+# package service will still be there when the next command arrives". On API 37 (run #41) the guest
+# reached system_server and then surfaceflinger crashed at t=72s, taking zygote and system_server
+# with it; the script was already running and `pm create-user` came back with
+# "cmd: Failure calling service package: Broken pipe (32)". Run #42 got past that with a retry and
+# then hit `cmd: Can't find service: package` after `am start-user`, on a line that was only there
+# to print something — under `set -e` an informational command killed the run.
+#
+# So: one helper, called before anything that talks to the framework, and no informational command
+# is ever allowed to fail the script. This is not API-37-specific; a framework restart during boot
+# is a property of a software-rendered emulator on a shared runner.
+# --------------------------------------------------------------------------------------------
+FRAMEWORK_TRANSIENT='Broken pipe|Can.t find service|device offline|device not found|Service package|no devices/emulators found'
+
 framework_ready() {
   local out
   out="$(adb shell pm list users 2>&1 || true)"
-  case "$out" in
-    *Broken*pipe*|*Service*not*found*|*device*offline*|*"Can't find service"*|"") return 1 ;;
-  esac
+  printf '%s' "$out" | grep -qE "$FRAMEWORK_TRANSIENT" && return 1
   printf '%s' "$out" | grep -q "UserInfo{" || return 1
   return 0
 }
-FRAMEWORK_OK=0
-for i in $(seq 1 60); do
-  if framework_ready; then
-    FRAMEWORK_OK=1
-    echo "framework answered after ${i} attempt(s):"
-    adb shell pm list users
-    break
-  fi
-  sleep 5
-done
-if [ "$FRAMEWORK_OK" != "1" ]; then
-  echo "!! the package manager never answered in 300 s; the framework is not coming up."
-  adb shell getprop sys.boot_completed
-  adb shell getprop init.svc.zygote
-  adb shell getprop init.svc.surfaceflinger
+
+# await_framework <label> — waits up to ~5 min for the package service to answer. Returns non-zero
+# only if it never does, and prints enough to say why.
+await_framework() {
+  local label="${1:-framework}" i
+  for i in $(seq 1 60); do
+    if framework_ready; then
+      [ "$i" -gt 1 ] && echo "await_framework($label): answered after $i attempts"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "!! await_framework($label): the package manager never answered in 300 s."
+  adb shell getprop sys.boot_completed 2>&1 || true
+  adb shell getprop init.svc.zygote 2>&1 || true
+  adb shell getprop init.svc.surfaceflinger 2>&1 || true
   adb shell dmesg 2>/dev/null | tail -30 || true
-  exit 1
-fi
+  return 1
+}
+
+# adb_fw <args...> — an adb shell command against the framework, retried across a restart.
+# Informational callers should append `|| true`; this function does not swallow failures itself,
+# because a command that genuinely cannot succeed must still be able to fail the run.
+adb_fw() {
+  local attempt out rc
+  for attempt in 1 2 3 4 5 6; do
+    # In an `if` condition, not a bare assignment: under `set -e` a failing command substitution
+    # in an assignment propagates and can kill the caller before the retry logic runs.
+    if out="$(adb shell "$@" 2>&1)"; then rc=0; else rc=$?; fi
+    if ! printf '%s' "$out" | grep -qE "$FRAMEWORK_TRANSIENT"; then
+      printf '%s\n' "$out"
+      return $rc
+    fi
+    echo "adb_fw: transient framework failure on attempt $attempt ($out); waiting"
+    await_framework "adb_fw retry" || return 1
+  done
+  printf '%s\n' "$out"
+  return $rc
+}
+
+log "wait for the framework to be usable, not merely booted"
+await_framework "initial" || exit 1
+echo "framework answered:"
+adb shell pm list users 2>&1 || true
 
 log "create the secondary user profile"
 # Retried because "the framework answers" and "the framework will still be up in a second" are
-# different claims, and run #41 is the evidence for the difference.
+# different claims; runs #41 and #42 are the evidence, and #42 only got through on attempt 2.
 CREATE_OUT=""
-for attempt in 1 2 3 4; do
+for attempt in 1 2 3 4 5 6; do
   CREATE_OUT="$(adb shell pm create-user "$USER_NAME" 2>&1 || true)"
   echo "attempt $attempt: $CREATE_OUT"
   case "$CREATE_OUT" in
@@ -215,7 +246,11 @@ log "start the new profile"
 # want the *unstarted* case to work, so the bridge is exercised after a start-user as well.
 adb shell am start-user "$USER_ID" 2>&1 || true
 sleep 5
-adb shell pm list users
+# Starting a secondary profile restarts enough of the framework that the package service can be
+# absent for a while. Run #42 died on the very next line — `pm list users`, which exists only to
+# print something — because `set -e` does not care why a command failed.
+await_framework "after start-user" || exit 1
+adb shell pm list users 2>&1 || true
 
 # INSTALL ORDER IS DELIBERATE, and it matches production rather than being convenient.
 #
@@ -232,20 +267,25 @@ adb shell pm list users
 # the ONLY visibility mechanism under test, which is the stricter configuration and the one that
 # must hold for a proxy the user installed by hand.
 log "install the app under test for user $USER_ID"
+await_framework "install app" || exit 1
 APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
 TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1)"
 echo "app=$APP_APK"; echo "test=$TEST_APK"
 adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
 adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
-adb shell pm list packages --user "$USER_ID" | grep -F "$APP_PKG" \
+adb_fw pm list packages --user "$USER_ID" | grep -F "$APP_PKG" \
   || { echo "!! the app under test is not installed for user $USER_ID"; exit 1; }
 
 log "install the proxy APK for user $USER_ID"
+await_framework "install proxy" || exit 1
 adb install --user "$USER_ID" -r /tmp/proxy.apk 2>&1 | tee premise-logs/install-proxy.log
-adb shell pm list packages --user "$USER_ID" | grep -F "$TARGET_PKG" \
+# adb_fw, not adb shell: a framework restart here prints nothing and would be reported as
+# "proxy is not installed", sending the next person after an install bug that does not exist.
+adb_fw pm list packages --user "$USER_ID" | grep -F "$TARGET_PKG" \
   || { echo "!! proxy is not installed for user $USER_ID"; exit 1; }
 
 log "install the production-signed proxy for user $USER_ID"
+await_framework "install prod-signed proxy" || exit 1
 # Signed with a DIFFERENT key than the app, carrying the app's certificate digest — the production
 # key layout. If this file is missing the caller-auth phase below is skipped loudly rather than
 # silently passing, so a harness regression cannot masquerade as coverage.
@@ -259,7 +299,7 @@ if [ -f /tmp/proxy-prodsign.apk ]; then
   adb install --user "$USER_ID" -r /tmp/proxy-prodsign.apk 2>&1 | tee premise-logs/install-proxy-prodsign.log
   grep -q "INSTALL_FAILED_DUPLICATE_PERMISSION" premise-logs/install-proxy-prodsign.log \
     && { echo "!! two proxies collided on a permission definition — the proxy must not define BRIDGE"; exit 1; }
-  adb shell pm list packages --user "$USER_ID" | grep -F "$PRODSIGN_PKG" \
+  adb_fw pm list packages --user "$USER_ID" | grep -F "$PRODSIGN_PKG" \
     || { echo "!! production-signed proxy ($PRODSIGN_PKG) is not installed for user $USER_ID"; exit 1; }
 else
   echo "!! /tmp/proxy-prodsign.apk missing — the 'Generate the proxy APKs' step did not produce it"
@@ -267,6 +307,7 @@ else
 fi
 
 log "confirm both proxies are installed side by side"
+await_framework "confirm coexistence" || exit 1
 # The whole point of moving the permission definition to :app. One proxy working was never enough:
 # reaching several targets is the product.
 adb shell pm list packages --user "$USER_ID" | grep -E "$TARGET_PKG|$PRODSIGN_PKG" | tee premise-logs/both-proxies.log
@@ -536,6 +577,7 @@ if [ -n "${PROXY_PID:-}" ]; then
 fi
 
 log "run the instrumented premise test as user $USER_ID"
+await_framework "premise instrument" || exit 1
 # --user is what puts the test process inside the secondary profile, so the app and the proxy
 # share a uid space and the signature-level permission grant applies.
 set +e
@@ -614,6 +656,7 @@ if [ "$INSTRUMENT_EXIT" -ne 0 ]; then
 fi
 
 log "run the PRODUCTION caller-auth premise test as user $USER_ID"
+await_framework "caller-auth instrument" || exit 1
 # The FUSE premise above installs a proxy signed with the SAME key as the app, so it only ever
 # exercises the signature-permission path. This phase installs one signed with a DIFFERENT key
 # (a fresh per-install key) carrying the app's certificate digest — the production layout, where
@@ -668,6 +711,7 @@ echo "CALLER-AUTH VERIFIED on API $API: the app reached a proxy signed with a DI
 echo "  ($PRODSIGN_PKG) via the generator-certificate digest path."
 
 log "teardown: uninstall the proxy KEEPING its data"
+await_framework "teardown" || exit 1
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave
 # Android/data behind, which is what the app's teardown strategy depends on.
 adb shell pm uninstall -k --user "$USER_ID" "$TARGET_PKG" 2>&1 || true
