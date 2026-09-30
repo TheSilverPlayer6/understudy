@@ -1120,6 +1120,76 @@ else
   echo "-- installer-session phase SKIPPED (RUN_INSTALLER_PHASE=${RUN_INSTALLER_PHASE:-1}) --"
 fi
 
+# --------------------------------------------------------------------------------------------
+# Process death mid-transfer (HANDOFF §3.6, the device half). The journal's semantics are
+# JVM-pinned; what only a device can prove is that a REAL SIGKILL during a REAL pull leaves a
+# record the next process finds and finishes from. Two instrument invocations, because a dead
+# process cannot keep testing:
+#   die    — builds a known tree in the proxy's storage, begins a journaled pull, and
+#            killProcess()es itself the moment the 64 MB file is demonstrably mid-copy;
+#   resume — a fresh process must find the journal RUNNING, re-run the pull, and prove every
+#            file byte-exact, the pre-death completions untouched (mtime), and the journal
+#            terminal afterwards.
+# The die phase's verdict is the JOURNAL FILE ON DISK, not the instrument exit — a crash is
+# the expected outcome there, which is exactly why this phase cannot use the whitelist helper:
+# "no OK line" is its success signature. Root is required to read the journal, so reduced
+# (no-root) runs skip the phase and say so.
+# --------------------------------------------------------------------------------------------
+if [ "${RUN_DEATH_PHASE:-1}" = "1" ] && [ "$HAVE_ROOT" = "1" ]; then
+  log "process-death phase 1: journaled pull, SIGKILL mid-transfer"
+  adb logcat -c 2>/dev/null || true
+  adb logcat -v time > premise-logs/death-logcat.log 2>&1 &
+  DEATH_LOGCAT_PID=$!
+  sleep 1
+  set +e
+  timeout 600 adb shell am instrument -w --user "$USER_ID" \
+    -e deathPhase die -e targetPackage "$TARGET_PKG" -e userId "$USER_ID" \
+    -e class dev.understudy.instrumented.TransferDeathPremiseTest \
+    "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/death-die-instrument.log
+  DIE_EXIT="${PIPESTATUS[0]}"
+  set -e
+  echo "die-phase am instrument exit=$DIE_EXIT (an abort/crash here is the EXPECTED outcome — the test kills its own process)"
+  JOURNAL_XML="/data/user/$USER_ID/$APP_PKG/shared_prefs/transfer-journal.xml"
+  adb shell "cat '$JOURNAL_XML'" 2>&1 | tee premise-logs/death-journal.log | head -25
+  if ! grep -q "RUNNING" premise-logs/death-journal.log; then
+    echo "!! the journal on disk does not say RUNNING after the kill — the die phase did not"
+    echo "   do its job, and a resume phase now would prove nothing. Failing here instead."
+    grep -hE "DEATH-DIAG" premise-logs/death-die-instrument.log premise-logs/death-logcat.log 2>/dev/null | head -10 || true
+    kill "$DEATH_LOGCAT_PID" 2>/dev/null || true
+    exit 1
+  fi
+  grep -hE "DEATH-DIAG" premise-logs/death-die-instrument.log premise-logs/death-logcat.log 2>/dev/null \
+    | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -10 || true
+
+  log "process-death phase 2: a fresh process must find the journal and finish the transfer"
+  DEATH_VERDICT=0
+  run_instrument_phase premise-logs/death-resume-instrument.log \
+    --user "$USER_ID" \
+    -e deathPhase resume -e targetPackage "$TARGET_PKG" -e userId "$USER_ID" \
+    -e class dev.understudy.instrumented.TransferDeathPremiseTest \
+    "$APP_PKG.test/$TEST_RUNNER" || DEATH_VERDICT=$?
+  log "death-resume instrument verdict=$DEATH_VERDICT (0=pass, 1=test failures, 2=guest crash/no result)"
+  sleep 2
+  kill "$DEATH_LOGCAT_PID" 2>/dev/null || true
+  wait "$DEATH_LOGCAT_PID" 2>/dev/null || true
+
+  log "process-death diagnostics"
+  grep -hE "DEATH-DIAG" premise-logs/death-resume-instrument.log premise-logs/death-logcat.log 2>/dev/null \
+    | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -20 || echo "(no DEATH-DIAG lines found)"
+
+  if [ "$DEATH_VERDICT" -ne 0 ]; then
+    echo "!! process-death resume verdict=$DEATH_VERDICT (1 = test failures, 2 = guest crashed or produced no result)"
+    grep -A25 -E "FAILURES!!!|Error in |INSTRUMENTATION_ABORTED" premise-logs/death-resume-instrument.log | head -70 || true
+    echo "!! PROCESS-DEATH RECOVERY FAILED: the journal did not carry a real kill into a"
+    echo "!!   byte-exact resumed transfer. This is the guarantee §3.6 exists for."
+    exit 1
+  fi
+  echo "PROCESS-DEATH RECOVERY VERIFIED on API $API: SIGKILL mid-pull left the journal RUNNING,"
+  echo "  and a fresh process resumed it to byte-exact completion, skipping what had finished."
+else
+  echo "-- process-death phase SKIPPED (RUN_DEATH_PHASE=${RUN_DEATH_PHASE:-1}, HAVE_ROOT=$HAVE_ROOT) --"
+fi
+
 log "teardown: uninstall the proxy KEEPING its data"
 await_framework "teardown" || exit 1
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave

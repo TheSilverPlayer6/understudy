@@ -192,6 +192,7 @@ jobs:
             allow-no-root: 0
             disable-system-ui: 0
             installer-phase: 1
+            death-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -205,6 +206,7 @@ jobs:
             allow-no-root: 0
             disable-system-ui: 0
             installer-phase: 1
+            death-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -218,6 +220,7 @@ jobs:
             allow-no-root: 1
             disable-system-ui: 0
             installer-phase: 1
+            death-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -250,6 +253,7 @@ jobs:
             disable-system-ui: 1
             # No new phases on the job that is still fighting for a stable boot.
             installer-phase: 0
+            death-phase: 0
             experimental: true
             boot-timeout: 900
             # Back to swiftshader_indirect. Run #44 tried angle_indirect and the emulator rejected
@@ -310,6 +314,7 @@ jobs:
             # Residual risk, stated plainly: task-snapshot readback on activity transitions and
             # screencap are also triggers, and this mitigation removes neither — the suite
             # launches no activities and takes no screenshots.
+
             #
             # Note the boot is also intermittently unstable on this image: runs #45 and #46 booted
             # and ran the suite, #44 and #47 never reached sys.boot_completed. So a red run here is
@@ -460,9 +465,10 @@ jobs:
           # RegionSampling) rather than trying to remove the capability, which cannot be done —
           # see the matrix comment and the block in run-premise-test.sh.
           DISABLE_SYSTEM_UI: ${{ matrix.disable-system-ui }}
-          # The in-app PackageInstaller phase (HANDOFF §3.4). Off on API 37 until that job can
-          # survive the phases it already has.
+          # The in-app PackageInstaller phase (HANDOFF §3.4) and the process-death recovery
+          # phase (HANDOFF §3.6). Off on API 37 until that job can survive the phases it has.
           RUN_INSTALLER_PHASE: ${{ matrix.installer-phase }}
+          RUN_DEATH_PHASE: ${{ matrix.death-phase }}
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -659,9 +665,10 @@ jobs:
         env:
           ALLOW_NO_ROOT: 0
           # Explicit although 1 is the default: the release job is the MOST valuable place for
-          # the installer phase, because it is the only one where a session-installed proxy and
-          # a minified, release-signed app meet.
+          # the installer and death phases — the only ones where a session-installed proxy, a
+          # minified release-signed app, and a journal written by R8'd code meet.
           RUN_INSTALLER_PHASE: 1
+          RUN_DEATH_PHASE: 1
           # The release build's identity: applicationId without the .debug suffix, and the
           # release output directories. Same orchestration script, same suite, same assertions
           # — the only variable is which app artifact it drives.
