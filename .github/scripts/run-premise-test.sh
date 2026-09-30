@@ -97,6 +97,10 @@ if [ "$HAVE_ROOT" != "1" ]; then
     exit 1
   fi
   EXPECT_PLANTED=false
+  # A GitHub Actions annotation, not just log text: a reduced run that only mentioned it in the
+  # transcript would still show a green tick with nothing on the summary page, which is how a
+  # silently narrower suite survives for months. This puts it on the run's front page.
+  echo "::warning title=Premise suite running REDUCED on API $API::adb root is unavailable, so fixture bytes could not be planted. Not proven by this job: reading data that PRE-DATES the proxy, and 'pm uninstall -k' preservation. Both remain covered by the rooted AOSP jobs."
   cat <<'BANNER'
 --------------------------------------------------------------------------------------------
 RUNNING IN REDUCED MODE: no root, so nothing was planted and nothing can be checked on the

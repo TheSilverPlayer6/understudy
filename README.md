@@ -240,11 +240,12 @@ keytool -printcert                         →  parses our hand-built PKCS#7
 
 ### Not covered
 
-* **OEM behaviour.** Everything verified so far is AOSP `target: default` on API 34 and 35
-  emulators plus `google_apis` on 36. MIUI/HyperOS, ColorOS and One UI each add installer guards,
-  background-kill rules and wireless-debugging timeouts of their own, and none of it has been
-  exercised. The `<queries><intent>` discovery mechanism in particular is worth confirming on OEM
-  builds, since it is what makes the bridge reachable at all.
+* **OEM behaviour.** Everything verified so far is AOSP `target: default` on API 34/35 and
+  `google_apis` on 36/37, all x86_64 emulators. MIUI/HyperOS, ColorOS and One UI each add installer
+  guards, background-kill rules and wireless-debugging timeouts of their own, and none of it has
+  been exercised. `<queries><intent>` discovery is the part most worth confirming there, since it is
+  what makes the bridge reachable at all, and OEM builds are where package-visibility behaviour is
+  most likely to have been "enhanced".
 * **The installer UX from inside the app.** CI installs with `adb install --user`; the
   `PackageInstaller` session path, the `STATUS_PENDING_USER_ACTION` round trip and the per-profile
   `REQUEST_INSTALL_PACKAGES` grant flow are still unexercised on a device.
@@ -263,28 +264,39 @@ The premise itself is no longer on this list. It is verified on a real Android s
 secondary profile, in CI on every push: `PREMISE VERIFIED on API 34` / `on API 35`, including that
 `pm uninstall -k` really does preserve the directories afterwards.
 
-### Why there is no rooted job above API 35
+### Which platforms CI covers, and one belief it corrected
 
-There is **no AOSP `target: default` system image for API 36 or 37**. `sdkmanager --list` offers
-`google_apis`, `google_apis_playstore` and `google_atd` for those levels and nothing else, and
-`google_apis` is production-signed, so `adb root` is refused. Root is not a convenience here:
-planting fixture bytes into a *secondary* user's private storage needs uid 0, because uid 2000 is
-exempt from the FUSE filter only inside its own mount namespace (measured, run #12), and even root
-is refused the FUSE view of another user (run #11) and must use the raw `/data/media/<user>` path.
+Four jobs: **API 34 and 35 on AOSP `target: default`**, and **API 36 and 37 on `google_apis`**.
+All four run the *full* suite.
 
-So API 36 runs a **reduced** job and says so. It still proves, on a real device in a real secondary
-profile: that a generated proxy installs and answers across Binder; that it runs in the intended
-profile; that a write through the bridge lands on the real filesystem; that the platform still
-hides that storage from every other package, so none of it can pass vacuously; that two proxies
-coexist; that the app reaches a *differently-signed* proxy via the generator digest; that traversal
-is refused; and that `<queries><intent>` discovery works without `QUERY_ALL_PACKAGES`. It cannot
-prove the two claims that need root-planted bytes — reading data that **pre-dates** the proxy (the
-backup/restore case), and `pm uninstall -k` preservation — and its final line prints
-`PREMISE VERIFIED (REDUCED, no root)` rather than pretending otherwise. The rooted jobs keep both.
+There is no AOSP `default` system image above API 35 — `sdkmanager --list` offers `google_apis`,
+`google_apis_playstore` and `google_atd` for 36 and 37 and nothing else. Milestone 4 concluded from
+that, and from `adb root` failing on the API 34/35 `google_apis` images, that nothing above 35 could
+be tested at all, because planting fixture bytes into a *secondary* user's private storage needs
+uid 0: uid 2000 is exempt from the FUSE filter only inside its own mount namespace (measured, run
+#12), and even root is refused the FUSE view of another user (run #11) and must use the raw
+`/data/media/<user>` path.
 
-The rooted jobs run with `ALLOW_NO_ROOT=0`, so losing root fails the run loudly. Run #30 is why:
-a single un-retried `adb root` lost the whole API 35 job, and a silently reduced suite would have
-looked identical to a passing one.
+**That conclusion was wrong, and only running it found out.** `adb root` succeeds on
+`system-images;android-36;google_apis;x86_64`. Run #36 rooted on the first attempt, planted fixtures
+under `/data/media/10`, cross-checked the per-user uid against `stat /data/user/10/<pkg>`, asserted
+that `pm uninstall -k` preserved the directories, and reported `OK (11 tests)` with nothing skipped
+plus `PREMISE VERIFIED on API 36`. "google_apis is production-signed and refuses `adb root`" is true
+of the API 34/35 images it was measured on; it is not a property of the target, and assuming it was
+cost coverage of the two newest platforms.
+
+The fallback for that assumption is still in place, because rootability of a Google-published image
+is not something this project controls. `ALLOW_NO_ROOT=1` on the `google_apis` jobs means that if a
+future image stops being rootable, the job degrades to the subset that needs no root and says so
+three ways — a `::warning::` annotation on the run's front page, a banner in the log listing exactly
+which claims are and are not proven, and a final line reading
+`PREMISE VERIFIED (REDUCED, no root)` instead of the normal one. What would be lost is reading data
+that **pre-dates** the proxy (the backup/restore case) and `-k` preservation; both stay covered by
+the AOSP jobs. The AOSP jobs run with `ALLOW_NO_ROOT=0`, so losing root there fails the run — run
+#30 is what a silent degradation would have looked like.
+
+API 37 needs `api-level: "37.0"`, quoted: unquoted, YAML parses it as a float and Actions renders
+`37`, which builds a system-image package name that does not exist.
 
 ## Known gaps
 

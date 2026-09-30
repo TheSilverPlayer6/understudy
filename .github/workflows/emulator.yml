@@ -158,27 +158,49 @@ jobs:
         # fixture bytes into a *secondary* user's private storage needs `adb root` and
         # google_apis images are production-signed and refuse it.
         #
-        # 36 is a REDUCED run and the reason is not laziness: there is no AOSP `default` system
-        # image for API 36 or 37 at all. `sdkmanager --list` offers google_apis,
-        # google_apis_playstore and google_atd for those levels and nothing else, so root is
-        # impossible and the fixtures cannot be planted. Since the project targets API 37,
-        # verifying nothing above 35 is worse than verifying a clearly labelled subset of it —
-        # the script prints exactly what is and is not proven, and the final line says
-        # "PREMISE VERIFIED (REDUCED, no root)". What is lost is the two claims that need bytes
-        # planted by root: reading data that pre-dates the proxy, and `pm uninstall -k`
-        # preservation. Both stay covered by the rooted jobs.
+        # There is no AOSP `default` system image above API 35 — `sdkmanager --list` offers
+        # google_apis, google_apis_playstore and google_atd for 36 and 37 and nothing else — so
+        # those levels run on google_apis.
+        #
+        # MEASURED, and it contradicts what this workflow used to assume: `adb root` SUCCEEDS on
+        # `system-images;android-36;google_apis;x86_64`. Run #36 rooted on attempt 1, planted
+        # fixtures under /data/media/10, cross-checked the per-user uid against
+        # /data/user/10/<pkg>, asserted `pm uninstall -k` preservation, and reported OK (11 tests)
+        # with nothing skipped — the full suite, not a subset. The "google_apis is production-signed
+        # and refuses adb root" finding from milestone 4 was measured on API 34/35 images and is
+        # true there; it is not a property of the `google_apis` target in general, and treating it
+        # as one nearly cost us coverage of the newest platform.
+        #
+        # `allow-no-root: 1` on those jobs is therefore a *fallback*, not the expected path: if a
+        # future image stops being rootable the job degrades to the subset that needs no root and
+        # says so loudly (a `::warning::` annotation plus a banner and a different final line)
+        # instead of failing for an environmental reason or, worse, passing while proving less.
+        # 34 and 35 stay at 0, so losing root there fails the run — which is what run #30 should
+        # have done rather than reporting a cause it had not established.
+        #
+        # api-level 37.0 is passed through verbatim into the package name, which is how the real
+        # image ids are spelled (`system-images;android-37.0;google_apis;x86_64`); `37` alone does
+        # not exist. The action accepts non-numeric values here — its own docs list 'R' and
+        # 'TiramisuPrivacySandbox'.
         include:
           - api-level: 34
             target: default
-            label: API 34, AOSP, rooted
+            label: API 34, AOSP
             allow-no-root: 0
           - api-level: 35
             target: default
-            label: API 35, AOSP, rooted
+            label: API 35, AOSP
             allow-no-root: 0
           - api-level: 36
             target: google_apis
-            label: API 36, google_apis, no root
+            label: API 36, google_apis
+            allow-no-root: 1
+          # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
+          # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
+          # package that does not exist. The real id keeps the minor.
+          - api-level: "37.0"
+            target: google_apis
+            label: API 37, google_apis
             allow-no-root: 1
     steps:
       - uses: actions/checkout@v4
@@ -260,12 +282,12 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
-          # `default` (AOSP) wherever one exists, because the test needs `adb root`: planting
-          # fixture bytes into a *secondary* user's private storage requires uid 0, since uid 2000
-          # is exempt from the FUSE filter only inside its own mount namespace and so cannot reach
-          # /storage/emulated/10 at all. Root is also more faithful — the raw /data/media/<user>
-          # path we write to is exactly where the rename-aside trick operates. API 36+ has no
-          # `default` image, hence google_apis and the reduced mode; see the matrix comment.
+          # `default` (AOSP) wherever one exists. Planting fixture bytes into a *secondary* user's
+          # private storage requires uid 0: uid 2000 is exempt from the FUSE filter only inside its
+          # own mount namespace and so cannot reach /storage/emulated/10 at all. Root is also more
+          # faithful — the raw /data/media/<user> path we write to is exactly where the
+          # rename-aside trick operates. There is no `default` image above API 35, so those levels
+          # use google_apis, which turns out to be rootable anyway; see the matrix comment.
           target: ${{ matrix.target }}
           arch: x86_64
           # No snapshot: a restored one could carry a user profile or an install over from a
@@ -274,9 +296,10 @@ jobs:
           emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
         env:
-          # 0 for the rooted jobs, so losing root fails the run loudly instead of silently
-          # degrading to a reduced suite that still reports success. That is exactly what
-          # happened in run #30, and the retry loop only helps if the failure is visible.
+          # 0 for the AOSP jobs, so losing root fails the run loudly instead of silently degrading
+          # to a reduced suite that still reports success. 1 for the google_apis jobs, where root
+          # is available today but is a property of the image Google published rather than
+          # something we control; see the matrix comment.
           ALLOW_NO_ROOT: ${{ matrix.allow-no-root }}
 
       - uses: actions/upload-artifact@v4

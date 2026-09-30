@@ -143,9 +143,10 @@ caller-authentication path. In rough priority order, what is actually left:
    runbook the backend would drive needs root, and self-paired wireless ADB lands in uid 2000.
    That has to be reconciled before the backend is worth writing.
 3. **OEM testing** — MIUI/HyperOS, ColorOS, One UI. Everything verified so far is AOSP
-   `target: default` on API 34/35 plus `google_apis` on 36. The `<queries><intent>` discovery
-   mechanism is the part most worth confirming on OEM builds, since it is what makes the bridge
-   reachable at all.
+   `target: default` on API 34/35 and `google_apis` on 36/37, all on x86_64 emulators. The
+   `<queries><intent>` discovery mechanism is the part most worth confirming on OEM builds, since it
+   is what makes the bridge reachable at all, and OEMs are where package-visibility behaviour is
+   most likely to have been "enhanced".
 4. **The installer UX on a device.** CI installs with `adb install --user`; the
    `PackageInstaller` session path, `STATUS_PENDING_USER_ACTION` and the per-profile
    `REQUEST_INSTALL_PACKAGES` grant flow are unexercised.
