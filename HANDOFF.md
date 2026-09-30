@@ -1,8 +1,10 @@
 # HANDOFF — read this first
 
-Last updated 2026-09-29. **Milestone 4 is complete: the premise is verified on real Android
-emulators and CI is green end to end.** Section 4 records what that took and what it turned up;
-section 3 is what remains.
+Last updated 2026-09-30. **Milestone 4 is complete: the premise is verified on real Android
+emulators.** Milestone 5 fixed the two things that stopped it being *usable* — a signed release
+that could not talk to the proxy it generated, and a device that could only ever hold one proxy at
+a time — and found a third problem underneath them: the app could not see its proxies at all.
+Sections 4 and 4b record what that took; section 3 is what remains.
 
 Companion documents, in reading order:
 
@@ -14,10 +16,16 @@ Companion documents, in reading order:
 | `research/02-milestone1-signing.md` | AXML + v1/v2 signing, and the five bugs that mattered |
 | `research/03-milestone2-app-layer.md` | The app layer: bridge, installer, orchestrator, UI |
 | `research/04-milestone3-running-it.md` | Robolectric verification, and what blocked a real device |
-| `../HANDOFF-NOTE.md` | **Sandbox traps** (outside the repo, in the workspace root) — read before touching the build environment |
+| `research/05-milestone4-premise-verified.md` | **The premise, verified.** Three stacked defects, and two findings that changed the product |
+| `research/06-milestone5-bridge-permission-ownership.md` | **Who owns the bridge permission, and who can see whom.** Includes the AOSP visibility rule the bridge had been relying on by accident |
+| `../HANDOFF-NOTE.md` | **Sandbox traps** (outside the repo, in the agent workspace root) — read before touching the build environment |
 
-If you only read one more thing after this file, make it `../HANDOFF-NOTE.md` section 6
-("Verification methodology"). It explains why several hours were lost to correct code.
+If you only read one more thing after this file, make it `research/06`. It explains how six
+consecutive green CI runs proved the bridge worked while saying nothing about *why*, and how the
+reason turned out to be an undocumented platform rule that a well-intentioned fix deleted.
+
+The `research/` tree is committed to this repo as of milestone 5. Before that every one of those
+links was dead — the files lived only in the agent workspace.
 
 ---
 
@@ -56,20 +64,33 @@ So there are two paths, and the app must tell the user which one they are on:
 gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
         :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  112 unit tests, 0 failures
-  app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~698 KB
+  139 unit tests, 0 failures
+  app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~699 KB
+  lint: 0 errors, 2 warnings (both kept deliberately)
 
 apksigner verify --verbose --print-certs <generated proxy>
   → Verifies · v2 scheme: true · 1 signer · RSA-2048
 aapt2 dump badging → package: name='com.example.targetgame'
 zipalign -c -p 4   → ALIGNMENT OK
+
+aapt2 dump permissions app-debug.apk
+  → permission: dev.understudy.permission.BRIDGE            (the app DEFINES it — see §4b)
+  → uses-permission: name='dev.understudy.permission.BRIDGE'
+aapt2 dump permissions <any generated proxy>
+  → nothing. A proxy defines no permission, so any number of them can coexist.
+aapt2 dump xmltree app-debug.apk
+  → E: queries / E: intent / E: action
+       android:name="dev.understudy.action.PROXY_DISCOVERY"   (how the app finds them)
 ```
 
-CI: `https://github.com/TheSilverPlayer6/understudy` — **all three jobs green** (run #18). The
-`jvm` job covers unit tests, every variant, `checkProxyTemplateFresh`, and
-apksigner/aapt2/zipalign over the generated APK. The two `premise` jobs boot KVM emulators on
-API 34 and API 35 and report `OK (10 tests)` plus `PREMISE VERIFIED`. Section 4 records what
-that took.
+CI: `https://github.com/TheSilverPlayer6/understudy`. The `jvm` job covers unit tests, every
+variant, lint, `checkProxyTemplateFresh`, and apksigner/aapt2/zipalign over the generated APK. The
+two `premise` jobs boot KVM emulators on API 34 and API 35 and report `OK (11 tests)` plus
+`PREMISE VERIFIED`.
+
+Runs #18–#27 were green end to end. **#28 and #29 were red**, and are the reason milestone 5
+exists; the commit after #29 is the fix and the next run confirms it. Section 4 records milestone
+4, section 4b records what #28 and #29 turned up.
 
 ### Components
 
@@ -78,32 +99,32 @@ that took.
 | `packaging/axml` | **done, device-verified** | AXML string-pool codec + `ManifestPatcher`. Re-encoding an unmodified pool is byte-identical to aapt2's output. |
 | `packaging/sign` | **done, verified against apksigner** | DER writer/reader, self-signed X.509 identity, v1 (JAR + hand-built PKCS#7), v2 (signing block, chunked digest, zip surgery). |
 | `packaging` | **done** | Aligned `ZipWriter`; `ProxyApkFactory` pipeline. |
-| `proxy-core` | **done** | The proxy's real code as an Android *library*, zero dependencies, so `:app` tests can drive it. |
+| `proxy-core` | **done** | The proxy's real code as an Android *library*, zero dependencies, so `:app` tests can drive it. Now also holds `CallerVerdictCache` (positive-only verdicts — §4b) and `ProxyDiscoveryReceiver` (the inert component that makes the proxy visible to the app). |
 | `proxy` | **done** | Manifest + dependency on `:proxy-core`; builds the template APK. |
-| `bridge` | **done, Robolectric-verified** | `BridgeClient`, `BridgeError`, contract mirror. |
-| `install` | **device-verified via CI's adb path; the in-app `PackageInstaller` UX is not** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI installs with `adb install --user`, which proves the *artifacts* install; the session-based flow the app uses is still unexercised. |
+| `bridge` | **done, Robolectric- and device-verified** | `BridgeClient`, `BridgeError`, contract mirror. `BridgeContract` is duplicated on purpose and compared by reflection, `DISCOVERY_ACTION` included. |
+| `install` | **device-verified via CI's adb path; the in-app `PackageInstaller` UX is not** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI installs with `adb install --user`, which proves the *artifacts* install; the session-based flow the app uses is still unexercised. `describe()` — the only explanation a user ever sees on failure — now has 12 tests. There is deliberately **no** `isInstalled()`; see the comment in `ProxyInstaller`. |
 | `core` | **done, 34 tests** | `SessionState`, `SessionManager`. Guards the teardown paths — see `SessionManagerTest`. |
-| `shell` | **done, 12 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. |
+| `shell` | **done, 14 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. |
 | `transfer` | **built, model-tested** | Streamed, resumable, write-then-swap. Both directions now have a UI. |
 | `storage` | **built, not device-verified** | SAF destination with persisted grants; `collectSourcesForPush` walks a user-chosen tree. |
 | `ui` | **built, never run** | Compose: Session / Files / Shell / About tabs. |
+| `packaging` (tests) | **done** | `BridgePermissionOwnershipTest` (6) pins who defines the bridge permission and how the app finds proxies, on the sources *and* on the committed binary template. `CallerVerdictCacheTest` (8) pins that a rejection is never remembered. |
 
 ---
 
 ## 3. What remains
 
-Items 1–5 of the previous list are done: the premise CI job is green, `SessionManager` has 34
-tests, release signing is wired (opt-in, see below), `checkProxyTemplateFresh` runs in `check`,
-and the push direction has a UI. In rough priority order, what is actually left:
+Everything on the milestone-4 list is done, and so is the item that headed it: the production
+caller-authentication path. In rough priority order, what is actually left:
 
-1. **Production signing vs the `signature`-level bridge permission.** The single largest gap, and
-   it is a design problem rather than a task. The proxy's provider is guarded by a
-   `signature`-level permission, so app and proxy must share a signer. In CI they do — both use
-   the committed test keystore. In production the proxy is signed with a per-install
-   `SigningIdentity` key, which cannot match a build-time release key, so a signed release would
-   install a proxy that every bridge call fails against. The fix is for the proxy to verify the
-   caller against the *generator's* certificate, baked in at generation time, rather than against
-   its own. Until then release output is deliberately unsigned.
+1. **Confirm milestone 5 on a device, then make release signing the default path.** The design
+   problem is solved (§4b): `:app` defines `BRIDGE` so it can hold it against a differently-signed
+   proxy, `enforceCaller()` pins the caller to the exact install that generated the proxy, and
+   `<queries><intent>` is what lets the app find it at all. What remains is that release signing is
+   still opt-in via an uncommitted `keystore.properties`, so release output stays unsigned without
+   it. Once a real keystore is in place, the whole flow needs one end-to-end pass on a device with
+   a *signed* release build — CI signs both APKs with the committed test key, so it exercises the
+   permission path and the digest path but never a genuine release key.
 2. **Wireless-ADB `ShellBackend`.** Only the manual command-generating backend ships, by choice: a
    backend that claims to be available and then cannot execute is worse than none. Note the
    finding in section 4 — a plain uid-2000 shell cannot reach another user's storage, so the
@@ -118,6 +139,13 @@ and the push direction has a UI. In rough priority order, what is actually left:
    `hasFragileUserData` "Keep app data" checkbox on a current build.
 6. **Recovery from process death** mid-transfer.
 7. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
+8. **Debug and release builds cannot coexist on one device.** Both define
+   `dev.understudy.permission.BRIDGE`, so the second install fails with
+   `INSTALL_FAILED_DUPLICATE_PERMISSION`. Same for upgrading over a build that left an *old* proxy
+   installed — those still define the permission themselves. `InstallResultReceiver.describe` now
+   says so. Namespacing the permission per `applicationId` would fix it, but that means teaching
+   `ManifestPatcher` a second substitution and touching the exact-match rule milestone 4 hardened;
+   not worth it for a case that only affects developers.
 
 ---
 
@@ -209,7 +237,7 @@ Consequences:
 
 Still unverified: whether OEM builds differ. This is AOSP `target: default` on API 34 and 35.
 
-### Signature-level permission in production — the next real problem
+### Signature-level permission in production — identified here, fixed in §4b
 
 The bridge is guarded by a `signature`-level permission, so the app and the proxy it generates
 must share a signer. In CI they do: both are signed with the committed test keystore. In
@@ -217,17 +245,121 @@ production the proxy is signed with a per-install `SigningIdentity` key, which *
 build-time release key. So a signed release build would install a proxy that every bridge call
 fails against with `SecurityException`.
 
-That is why release signing is deliberately opt-in via an uncommitted `keystore.properties` and
-why the release output stays unsigned without it: shipping a release build that looks finished
-but cannot talk to its own proxy is worse than an obviously unsigned one. The fix is for the
-proxy to verify the caller against the *generator's* certificate (baked in at generation time)
-rather than against its own, which is what a `signature`-level permission cannot express. Not
-implemented; see `research/05-milestone4-premise-verified.md`.
+That is why release signing was made deliberately opt-in via an uncommitted `keystore.properties`,
+with unsigned release output as the fallback: shipping a release build that looks finished but
+cannot talk to its own proxy is worse than an obviously unsigned one. The diagnosis at the time
+was half right — the digest mechanism does fix the *authorisation*, but it could never have run,
+because the platform gate fires first. Section 4b is the rest of it.
+
+---
+
+## 4b. Milestone 5: who owns the permission, and who can see whom
+
+Full write-up in `research/06-milestone5-bridge-permission-ownership.md`. The short version,
+because it is the least intuitive thing in the project and it cost three CI runs.
+
+### Run #28 — no two proxies could ever be installed
+
+The new caller-auth step installed a second proxy and died in under ten seconds:
+
+```
+INSTALL_FAILED_DUPLICATE_PERMISSION: Package com.example.prodgame attempting to redeclare
+  permission dev.understudy.permission.BRIDGE already owned by com.example.targetgame
+```
+
+`:proxy`'s manifest **declared** the permission, so every generated proxy declared it, and a
+permission name may be defined by only one package on the device. Permission definitions are
+device-wide exactly like package identity is. For an app whose purpose is reaching several
+targets' save data, that is a product bug: the second game fails, with an error naming a
+permission the user has never heard of.
+
+### The design hole underneath it
+
+A `signature` permission is granted to packages signed like whichever package **defines** it. With
+the proxy as definer, and the proxy signed with a per-install key, Understudy could never hold
+`BRIDGE` in production. The platform checks a provider's `android:permission` **before any
+provider code runs**, so every call was refused at the gate and `enforceCaller()` — the
+generator-certificate digest check written to solve exactly this — was dead code.
+
+**Fix: `:app` defines `BRIDGE`, the proxy only requires it.** Requiring a permission defined by
+another package is ordinary Android. The app matches its own certificate, so the gate opens, and
+`enforceCaller()` becomes the real authorisation — "the exact install that generated me", which is
+strictly stronger than "some app signed with the release key". If `:app` is absent the permission
+is undefined, and an undefined component permission fails **closed**.
+
+### Run #29 — and then the bridge stopped working at all
+
+5 of 10 `BridgePremiseTest` cases failed, including the basic `ping` that had passed on six
+consecutive green runs:
+
+```
+IllegalArgumentException: Unknown authority com.example.targetgame
+```
+
+In the *same log*, seconds earlier, from the shell:
+
+```
++ adb shell content query --user 10 --uri content://com.example.targetgame/data
+Row: 0 name=files, isDir=1, … readable=1, writable=1
++ adb shell content call --user 10 --uri content://com.example.targetgame --method ping
+Result: Bundle[{protocol=1, package=com.example.targetgame, ok=true, user=10, …}]
+```
+
+The provider was alive and serving. The app could not **see** it. Package-visibility filtering
+(API 30+) covers `ContentResolver` authority resolution, and `Unknown authority` is
+character-for-character the same message as "nothing is installed there".
+
+Nothing in the project ever declared `<queries>`. Visibility had come from the permission itself —
+AOSP `AppsFilter.addPackageInternal` populates `mQueryableViaUsesPermission`, so **a package
+becomes visible to anything that requests a permission it defines**, in both install orders, with a
+guard so defining and requesting your own buys nothing. That rule is not in the published
+package-visibility documentation. Moving the definition to `:app` silently deleted the only thing
+making proxies visible.
+
+**Fix: `<queries><intent>` on a custom action every proxy advertises.** The target package name is
+chosen at generation time, so `<queries><package>` and `<queries><provider>` cannot name it, a
+fixed proxy-defined permission collides again, and a per-target one cannot be requested
+statically. `QUERY_ALL_PACKAGES` would work and is deliberately not used.
+
+The action lives on a **new** component, `ProxyDiscoveryReceiver`, not as a second filter on
+`ProxyStatusActivity` — and that is not a stylistic choice. `KEEP_HIDDEN` teardown hides the proxy
+by disabling that activity, and visibility is computed from *enabled* components, so a filter there
+would stop matching the moment the proxy hid itself. The app would lose the bridge exactly when it
+needs it, to call `showLauncher` and undo the hiding: a permanently unreachable proxy with no icon
+and no UI, created by the app itself. The receiver is exported, inert, guarded by `BRIDGE`, and
+nothing ever disables it.
+
+### The third bug, found by reading rather than by running
+
+`enforceCaller()` cached **negative** verdicts per uid. It authenticates callers through
+`PackageManager`, which is itself visibility-filtered; the caller does become visible ("any app
+that accesses a content provider in your app" is on the published automatic list — the reverse
+direction, and what makes the digest check possible at all), but that bookkeeping is posted to a
+handler, so the **first** call can race it and resolve no packages. One racing call cached `false`
+forever: `SecurityException` on every subsequent call from the legitimate owner, unrecoverable
+short of reinstalling the proxy. `CallerVerdictCache` now stores positives only, and
+`matchesGenerator` distinguishes "no visible packages" (transient) from "wrong certificate"
+(permanent) in logcat, because a support report cannot tell them apart otherwise.
+
+### What CI does differently now
+
+* the app installs **before** the proxies — the production order, and the reverse of before;
+* `adb install -i` is deliberately **not** used. It would also grant visibility via
+  `canQueryAsInstaller` and let the suite pass with `<queries>` broken. Plain `adb install` leaves
+  `<queries>` as the only mechanism under test;
+* `dumpsys package permission`, `dumpsys package queries` and `cmd package query-receivers` are
+  captured every run, so the next visibility failure arrives with the platform's own answer;
+* both proxies are asserted installed side by side. Coexistence is the product.
 
 ## 5. Things that will bite you
 
 Ranked by how much time they cost me.
 
+0. **`Unknown authority` does not mean "not installed".** From API 30 the platform filters package
+   visibility, and the filter covers `ContentResolver` authority resolution. An app that cannot
+   *see* a provider gets the same `IllegalArgumentException: Unknown authority` it would get if
+   nothing were there — while `adb shell content query` against the same URI returns rows, because
+   the shell is not filtered. Six green CI runs hid this. See §4b.
 1. **Robolectric does not enforce permissions.** The missing
    `<uses-permission android:name="dev.understudy.permission.BRIDGE"/>` in `:app` was invisible
    in 26 passing integration tests and would have been a total failure on every real device.

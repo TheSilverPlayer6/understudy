@@ -45,10 +45,17 @@ manifest and depends on `:proxy-core`; `:app` gets it as `testImplementation`.
 
 Two non-obvious constraints, both of which produced a build failure before I understood them:
 
-1. **The class package must stay `dev.understudy.proxytpl`.** `ManifestPatcher` re-targets the
-   binary manifest by prefix-substituting that string, which is what makes the fully-qualified
-   component names follow the new package. Renaming the classes would silently break proxy
-   installation with a `ClassNotFoundException` at first contact.
+1. **The class package must stay `dev.understudy.proxytpl`.** Renaming the classes would silently
+   break proxy installation with a `ClassNotFoundException` at first contact.
+
+   > **Correction, added at milestone 4 — the *reason* given here was wrong and the fix it implied
+   > was worse than the bug.** This said `ManifestPatcher` prefix-substituted the string "which is
+   > what makes the fully-qualified component names follow the new package". They must **not**
+   > follow it: a component class's package has no obligation to match the application's package,
+   > and the dex keeps `Ldev/understudy/proxytpl/…`. Prefix substitution made PackageManager look
+   > for a class that does not exist and the proxy died at process start. Substitution is now exact
+   > match on the bare package string only. The constraint above survives; its justification did
+   > not. See `HANDOFF.md` §6 and `research/05-milestone4-premise-verified.md`.
 2. **The module namespace must nonetheless be unique.** AGP refuses to merge two modules sharing
    one: *"Namespace 'dev.understudy.proxytpl' is used in multiple modules"*. Namespace and class
    package are independent — namespace only governs `BuildConfig` and `R`, neither of which this

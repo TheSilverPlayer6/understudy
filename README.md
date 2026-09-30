@@ -110,7 +110,7 @@ applied anywhere. The Compose compiler plugin is still required.
 | `packaging/sign` | DER writer/reader, self-signed X.509 identity, v1 (JAR) and v2 signers |
 | `packaging` | Aligned ZIP writer and the `ProxyApkFactory` pipeline |
 | `bridge` | `BridgeClient`, the contract mirror, and typed errors |
-| `install` | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver` |
+| `install` | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver` (whose `describe()` turns raw platform status codes into the explanation a user actually gets) |
 | `core` | `SessionState` machine and `SessionManager` |
 | `shell` | `ShellBackend` and the `ShellCommands` runbook generator |
 | `transfer` | `TransferEngine` — streamed, resumable, write-then-swap |
@@ -121,9 +121,21 @@ applied anywhere. The Compose compiler plugin is still required.
 compile against it. **Zero dependencies**, framework APIs only: this code ends up inside the
 generated APK's `classes.dex`, which is installed standalone.
 
+Besides `ProxyFileBridge`, `BridgePaths` and `ProxyStatusActivity` it holds two classes that exist
+for platform-mechanics reasons rather than functional ones, and both are load-bearing:
+
+* `ProxyDiscoveryReceiver` — inert, exported, never disabled. Its only job is to advertise
+  `BridgeContract.DISCOVERY_ACTION` so `:app`'s `<queries><intent>` makes this package *visible*;
+  an invisible provider cannot be resolved at all. See "Security notes".
+* `CallerVerdictCache` — the positive-only memo behind `enforceCaller()`. Split out from the
+  provider so the invariant "a rejection is never remembered" can be tested directly instead of
+  argued about.
+
 Two constraints that look contradictory but are not:
-* the **class package must stay `dev.understudy.proxytpl`**, because `ManifestPatcher`
-  prefix-substitutes that string to re-target fully-qualified component names;
+* the **class package must stay `dev.understudy.proxytpl`**, because `ManifestPatcher` substitutes
+  that exact string to re-target the manifest, and the component class names in the manifest are
+  aapt's resolution of it. Renaming the classes would silently break proxy installation with a
+  `ClassNotFoundException` at first contact;
 * the **module namespace must be unique**, so it is `dev.understudy.proxycore`. Namespace only
   governs `BuildConfig`/`R`, neither of which this module has.
 
@@ -169,9 +181,10 @@ No `apksigner`, no `zipalign`, no BouncyCastle at runtime.
 
 ## Testing
 
-112 JVM tests, all passing, plus an instrumented suite that runs on a real Android emulator in
-CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE
-layer and no JVM test can reach it.
+139 JVM tests, all passing, plus two instrumented suites that run on real Android emulators in
+CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE layer,
+and the second claim is about platform package-visibility and permission rules, and no JVM test can
+reach either.
 
 
 | Suite | Covers |
@@ -182,6 +195,10 @@ layer and no JVM test can reach it.
 | `TransferModelTest` (11) | Progress arithmetic, clamping, empty-transfer edge cases, and the success predicate that must not report success on a partial copy. |
 | `ManifestPatcherTest` (10) | Parses the **real AGP-produced manifest** committed as a fixture. Asserts a no-op re-encode is byte-identical, that only the bare package string is rewritten, that the permission is preserved, that the chunk chain still lands exactly on EOF, and that invalid package names are rejected. |
 | `V2SignerStructureTest` (6) | Re-parses our own signer block with an independent reader mirroring apksig's field order; verifies the signature over exactly the embedded `signedData`; checks the signing-block framing and the `0xa5`/`0x5a` chunked-digest rules. |
+| `BridgePermissionOwnershipTest` (6) | Who **defines** `dev.understudy.permission.BRIDGE` and how the app **finds** its proxies — the two facts that decided CI runs #28 and #29. Checks the sources *and* the committed binary template, using the project's own AXML parser: `protectionLevel` appears in a string pool only as a `<permission>` element's attribute, so its absence proves a proxy defines nothing while the permission name's presence proves the provider still requires it. Also pins `<queries>` for the discovery action, and that retargeting preserves the action and every component class name. |
+| `CallerVerdictCacheTest` (8) | That a **negative** caller verdict is never cached. `enforceCaller()` authenticates through `PackageManager`, which is visibility-filtered, and a caller only becomes visible because it accessed our provider — bookkeeping that is posted to a handler, so the first call can race it. A cached miss would lock the legitimate owner out for the life of the process. |
+| `InstallFailureDescriptionTest` (12) | `InstallResultReceiver.describe()`, the only explanation a user ever sees when an install fails: that `UPDATE_INCOMPATIBLE` says package identity is device-wide so another profile will not help, that `DUPLICATE_PERMISSION` names the permission and says to remove the stale proxy, that a declined prompt is not dressed up as a conflict, and that an unmapped failure keeps the platform's raw text. |
+| `ProdSignedProxyTest` (1) | Generates the artifact CI uses for the **production** key layout: signed with a fresh random key (never the app's) and carrying the SHA-256 of the app's certificate. Skips loudly rather than silently if either input is missing. |
 | `ProxyApkFactoryTest` (6) | End-to-end generation: zip CRC/size integrity, required and dropped entries, determinism, that two targets differ only in identity, and that the generator's certificate digest is baked in at the path the proxy reads **and covered by the v1 signature**. Writes a sample APK for external verification. |
 
 On a real emulator (API 34 and 35, KVM, `target: default` so `adb root` works),
@@ -190,6 +207,9 @@ into it, plants known bytes as root, and asserts the premise:
 
 * the proxy is reachable across the process boundary, so the `signature`-level BRIDGE permission
   really is granted between two separately built APKs;
+* the proxy is **visible** to the app through `<queries><intent>` while the app holds no
+  `QUERY_ALL_PACKAGES` — without visibility the platform will not even resolve the provider, and
+  the failure is `Unknown authority`, indistinguishable from "not installed";
 * it runs in the intended profile;
 * bytes planted by root into `Android/data/<pkg>` and `Android/obb/<pkg>` are listed and streamed
   back through the bridge;
@@ -227,10 +247,16 @@ keytool -printcert                         →  parses our hand-built PKCS#7
 * **`hasFragileUserData`** actually producing the "Keep app data" checkbox on a current build.
 * **Recovery from process death** mid-transfer.
 
+A second instrumented class, `CallerAuthPremiseTest`, covers the **production key layout** rather
+than the test one. CI installs a proxy signed with a fresh random key that carries the SHA-256 of
+the app's own certificate, alongside the same-key one, and asserts the app can still reach it:
+`ping`, `mkdirs`, `openFile` in both directions, `list` and `statPath` — every gated provider
+entry point. That install also proves two proxies coexist for one user, which they could not while
+the proxy defined the bridge permission itself.
+
 The premise itself is no longer on this list. It is verified on a real Android system, in a
-secondary profile, on two API levels, in CI on every push: `OK (10 tests)` and
-`PREMISE VERIFIED on API 34` / `on API 35`, including that `pm uninstall -k` really does preserve
-the directories afterwards.
+secondary profile, on two API levels, in CI on every push: `PREMISE VERIFIED on API 34` /
+`on API 35`, including that `pm uninstall -k` really does preserve the directories afterwards.
 
 ## Known gaps
 
@@ -239,21 +265,32 @@ the directories afterwards.
   assembly deliberately produces `app-release-unsigned.apk` rather than falling back to the
   committed test identity, which is public and must never sign a distributed build.
 
-  The design problem this used to imply is solved. A `signature`-level permission requires caller
-  and provider to share a certificate, which is impossible in production: the proxy is signed with
-  a per-install key generated on the device, the app with its build-time key. So the generator now
-  bakes its own certificate's SHA-256 into the proxy as
-  `assets/understudy-generator-cert.sha256`, and `ProxyFileBridge.enforceCaller()` checks every
-  `query`/`openFile`/`call` against it. The permission is kept as a second layer — it costs
-  nothing and covers the CI/debug configuration, where both APKs genuinely do share the committed
-  test key. With no digest asset the proxy falls back to permission-only enforcement, which is
-  what the test suite and CI rely on, and that fallback is an explicit test rather than an
-  accident.
+  The design problem this used to imply is solved, and solving it took two attempts because the
+  first one broke something unrelated. See `research/06-milestone5-bridge-permission-ownership.md`.
 
-  What remains unverified about this is the production shape end to end: CI signs both APKs with
-  the test keystore, so it exercises the *permission* path, not the digest path. The digest path
-  is unit-tested (asset present at the right path, covered by the v1 signature, malformed digests
-  rejected) but has not run on a device against a differently-signed app.
+  A `signature`-level permission is granted to packages signed like whichever package **defines**
+  it, and the platform checks a provider's `android:permission` before any provider code runs. So
+  with the proxy as the definer, and the proxy signed with a per-install key, Understudy could
+  never hold `BRIDGE` in production and `enforceCaller()` was dead code. **`:app` now defines
+  `BRIDGE` and the proxy only requires it** — requiring a permission defined by another package is
+  ordinary Android. The generator bakes its own certificate's SHA-256 into the proxy as
+  `assets/understudy-generator-cert.sha256`, and `ProxyFileBridge.enforceCaller()` checks every
+  `query`/`openFile`/`call` against it, which is strictly stronger than a signature permission:
+  "the exact install that generated me" rather than "some app signed with the release key". With
+  no digest asset the proxy falls back to permission-only enforcement, and that fallback is an
+  explicit test rather than an accident.
+
+  What remains unverified is a genuine *release* key end to end. CI signs the app with the committed
+  test keystore and the production-shaped proxy with a fresh random key, so both the permission
+  path and the digest path are exercised — but never with the app signed by a real distribution
+  key. That is a one-run check once a keystore exists.
+* **Debug and release builds cannot be installed at the same time**, because both define
+  `dev.understudy.permission.BRIDGE` and a permission name may be defined by only one package on
+  the device. The same applies when upgrading over a build that left an *old* proxy installed —
+  those still define the permission themselves, so uninstall them first.
+  `InstallResultReceiver.describe` explains both. Namespacing the permission per `applicationId`
+  would fix it, at the cost of a second substitution in `ManifestPatcher`; not worth it for a case
+  that only affects developers.
 * The only `ShellBackend` is the manual one. A self-pairing wireless-ADB backend is the intended
   upgrade; it is not stubbed in, because a backend that reports itself available and then cannot
   execute is worse than no backend.
@@ -281,21 +318,49 @@ the directories afterwards.
   `dev.understudy.permission.BRIDGE` at `protectionLevel="signature"`, and by
   `ProxyFileBridge.enforceCaller()`, which checks the calling uid's signing certificate against
   the SHA-256 digest of the *generator's* certificate that was baked into the APK at generation
-  time. The second layer is what makes production work at all — a signature-level permission
-  needs caller and provider to share a certificate, which they cannot when the proxy is signed
-  with a per-install device key and the app with a build-time key. Verdicts are cached per uid,
-  `SYSTEM_UID` and the proxy's own uid are trusted, a malformed digest fails closed, and an
-  absent one falls back to permission-only (the CI/debug configuration). Both sides validate
-  paths independently — NUL bytes, absolute paths, `..`, backslashes, empty segments — and the
-  proxy re-checks via canonical paths so a symlink planted inside the tree cannot redirect it.
+  time. The second layer is what makes production work at all — a signature-level permission is
+  granted to packages signed like its **definer**, and the definer is `:app`, so the permission
+  alone would admit any build signed with the release key rather than the one install that made
+  this proxy.
+
+  **`BRIDGE` is defined by `:app` and never by a proxy.** That is load-bearing in both directions:
+  a proxy that defined it could not be installed alongside another one
+  (`INSTALL_FAILED_DUPLICATE_PERMISSION`), and the app could never hold it in production. If
+  `:app` is not installed the permission is undefined and an undefined component permission fails
+  **closed**, which is the safe direction.
+
+  Positive caller verdicts are cached per uid and **negative ones never are** —
+  `matchesGenerator` resolves callers through `PackageManager`, which is visibility-filtered, and
+  a caller only becomes visible because it accessed our provider; that bookkeeping is posted to a
+  handler, so the first call can race it. Caching the miss would lock the legitimate owner out for
+  the lifetime of the process. `SYSTEM_UID` and the proxy's own uid are trusted, a malformed
+  digest fails closed, and an absent one falls back to permission-only (the CI/debug
+  configuration). Both sides validate paths independently — NUL bytes, absolute paths, `..`,
+  backslashes, empty segments — and the proxy re-checks via canonical paths so a symlink planted
+  inside the tree cannot redirect it.
+* `QUERY_ALL_PACKAGES` is still not requested, and finding the proxies does not need it. Package
+  visibility is filtered from API 30 and that filtering covers `ContentResolver` authority
+  resolution, so an invisible provider fails with `Unknown authority` — identical to "not
+  installed". Every proxy advertises `dev.understudy.action.PROXY_DISCOVERY` on an inert exported
+  receiver, and `:app` declares `<queries><intent>` for it, which matches exactly the set of
+  proxies and nothing else. The receiver is separate from `ProxyStatusActivity` on purpose:
+  `KEEP_HIDDEN` teardown disables that activity, and visibility is computed from *enabled*
+  components, so a filter there would make the proxy unreachable at the moment the app needs to
+  reach it to un-hide itself.
 
   Note the threat model this does and does not cover. The digest proves the caller is the install
   that generated this proxy; it does not survive the generator being replaced by a
   differently-signed build, which invalidates every proxy it made. That is intentional — those
   proxies must stop trusting the new app — but it means a re-signed or sideloaded update to
   Understudy requires regenerating and reinstalling its proxies.
-* `QUERY_ALL_PACKAGES` is not requested. Proxy detection is done by calling the provider, which is
-  stronger evidence than a package query and needs no permission.
+* Proxy **presence** is decided by calling the provider, never by asking `PackageManager`. A
+  successful `ping` is strictly stronger evidence than a package query — it proves the provider is
+  live, the permission is granted, the protocol matches and the proxy is in the profile we asked
+  for — and a truthful "installed" would still be the wrong answer, because an installed proxy
+  that fails any of those is not usable. `ProxyInstaller.isInstalled()` existed, was never called,
+  and was wrong on API 30+ (`getPackageInfo` is visibility-filtered, and `runCatching` turns
+  `NameNotFoundException` into `false`, indistinguishable from a real absence); it was removed with
+  a comment explaining why, because it is the obvious thing to add back.
 * **Teardown refuses to destroy data without an explicit `confirmDataLoss = true`**, and
   evacuate-then-uninstall is only offered once a completed pull has been recorded. Every failure
   path that could leave data ambiguous sets `dataAtRisk` and stops rather than proceeding.
