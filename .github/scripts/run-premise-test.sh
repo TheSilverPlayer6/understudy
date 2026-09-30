@@ -293,8 +293,10 @@ adb shell pm list users 2>&1 || true
 # must hold for a proxy the user installed by hand.
 log "install the app under test for user $USER_ID"
 await_framework "install app" || exit 1
-APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
-TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1)"
+# `|| true` for the same reason: `find | head -1` can SIGPIPE, and an empty variable then fails at
+# the `adb install` below with a message that names the file, which is the useful place to fail.
+APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1 || true)"
+TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1 || true)"
 echo "app=$APP_APK"; echo "test=$TEST_APK"
 adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
 adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
@@ -489,6 +491,14 @@ LOGCAT_PID=$!
 sleep 1
 
 log "probe the provider directly from the shell (bypasses our client)"
+# INFORMATIONAL, and it does not work everywhere. On API 34/35/36 a root shell resolves
+# `content://<target>/data` and returns rows, which is useful because it exercises the provider
+# through the platform rather than through BridgeClient. On API 37 (run #45) the same command, from
+# the same root shell, with both proxies confirmed installed, returns:
+#   java.lang.IllegalStateException: Could not find provider: com.example.targetgame
+# The authoritative path is the instrumented suite, which runs as the app inside user 10 — that is
+# what the premise rests on and what the verdict is read from. A stack trace here is not a failure
+# of the product, and this note exists so the next reader does not spend a run finding that out.
 # `content query` exercises the same provider through the platform, so if this also returns
 # nothing the problem is in the proxy; if it works, the problem is in our client or in how the
 # app resolves the authority.
@@ -521,7 +531,15 @@ adb shell ls -laR "/data/media/$USER_ID/Android/data/$TARGET_PKG" 2>&1 | head -3
 #       (data was mode 2770 group ext_data_rw, obb 2771 group ext_obb_rw).
 # Everything below is diagnostic and must never change the verdict.
 log "diagnose the proxy's view of its own data root"
-PROXY_PID="$(adb shell pidof "$TARGET_PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+# `|| true` is load-bearing, and this is the THIRD time this class of bug has ended a run.
+# `pidof` exits 1 when the process is not running, which is a normal and expected answer here —
+# on API 37 (run #45) the shell's `content query` probe could not resolve the provider, so nothing
+# had started the proxy process yet. Under `set -euo pipefail` the non-zero exit inside a command
+# substitution propagates to the assignment and kills the script, two lines below a comment saying
+# "Everything below is diagnostic and must never change the verdict". The same thing happened with
+# the `grep | head` that parses create-user (run #41) and with an informational `pm list users`
+# (run #42). Rule for this file: a command whose only job is to print something gets `|| true`.
+PROXY_PID="$(adb shell pidof "$TARGET_PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}' || true)"
 echo "proxy pid: ${PROXY_PID:-<not running>}"
 if [ -n "${PROXY_PID:-}" ]; then
   echo "-- storage-related properties --"
