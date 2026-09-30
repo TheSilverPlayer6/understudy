@@ -91,6 +91,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // Applied when the androidTest variant is minified, which AGP does whenever it
+            // targets a minified build type (testBuildType=release). Without these the R8 run
+            // for the instrument dies on androidx.test's compile-only errorprone references,
+            // and the test classes the CI script addresses by name would be renamed.
+            testProguardFiles("proguard-test-rules.pro")
             // Signed only when the operator supplies their own identity via keystore.properties
             // (see signingConfigs). Without it the output stays -unsigned rather than falling
             // back to the committed test key: that key is public, and shipping a release build
@@ -111,20 +116,37 @@ android {
         }
     }
 
+    // Which build type the androidTest variant targets. AGP's default is "debug"; the
+    // release-E2E CI job passes -Punderstudy.testBuildType=release so the premise suite
+    // instruments the R8-minified, release-SIGNED app — the production artifact — instead of
+    // the debug one. Unit test variants exist for every build type either way, so the proxy
+    // generation step is unaffected by this knob.
+    testBuildType = providers.gradleProperty("understudy.testBuildType").orNull
+        ?.takeIf { it.isNotBlank() } ?: "debug"
+
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
-            // Lets ProxyApkFactoryTest sign the generated proxy with the same identity this
-            // module's debug build uses. Without it the two APKs differ in signer and the
-            // signature-level BRIDGE permission cannot be granted.
+            // The identity ProxyApkFactoryTest and ProdSignedProxyTest treat as "the app's".
+            // Normally the committed test keystore this module's debug build is signed with:
+            // the generated proxy then shares a signer with the app (so the signature-level
+            // BRIDGE permission can be granted) and the baked generator-cert digest matches
+            // what the app computes for itself on a device. The release-E2E CI job overrides
+            // all three with the ephemeral keystore its release APK is signed with, so the
+            // same tests produce artifacts for THAT identity instead — which is what closes
+            // HANDOFF §3.1 ("CI … never a genuine release key").
+            val appKeystore = providers.gradleProperty("understudy.appKeystore").orNull
+                ?.takeIf { it.isNotBlank() }
+                ?: rootProject.file("keystore/understudy-test.p12").absolutePath
+            val appKeystorePassword = providers.gradleProperty("understudy.appKeystorePassword").orNull
+                ?.takeIf { it.isNotBlank() } ?: "understudy"
+            val appKeystoreAlias = providers.gradleProperty("understudy.appKeystoreAlias").orNull
+                ?.takeIf { it.isNotBlank() } ?: "understudy"
             all {
-                it.systemProperty(
-                    "understudy.testKeystore",
-                    rootProject.file("keystore/understudy-test.p12").absolutePath,
-                )
-                it.systemProperty("understudy.testKeystorePassword", "understudy")
-                it.systemProperty("understudy.testKeystoreAlias", "understudy")
+                it.systemProperty("understudy.testKeystore", appKeystore)
+                it.systemProperty("understudy.testKeystorePassword", appKeystorePassword)
+                it.systemProperty("understudy.testKeystoreAlias", appKeystoreAlias)
             }
         }
     }

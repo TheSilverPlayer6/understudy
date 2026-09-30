@@ -453,3 +453,204 @@ jobs:
             premise-logs/
           if-no-files-found: warn
           retention-days: 14
+
+  # --------------------------------------------------------------------------------------------
+  # The production artifact, end to end, on a device.
+  #
+  # Every other job here tests the DEBUG app signed with the COMMITTED test keystore. That key
+  # is public, it is the identity the same-key proxy shares (so those runs exercise the
+  # signature-permission path), and ProdSignedProxyTest bakes ITS digest into the production
+  # proxy. The one configuration nothing covered is the one users actually get: an R8-minified
+  # RELEASE build signed with a key that exists nowhere in the repo, talking to a proxy signed
+  # with a different key again, authorised by the generator-cert digest baked from the release
+  # certificate. HANDOFF §3.1 calls this "one end-to-end pass … with a signed release build";
+  # this job is that pass, with an ephemeral key standing in for the operator's.
+  #
+  # The key is generated per run and thrown away with the runner, so keystore.properties never
+  # needs to exist outside this job, and a leaked log line would leak nothing. What the job
+  # proves is key-agnostic by construction: the digest the proxy carries is computed from
+  # whatever keystore Gradle was pointed at, and the steps below assert the three equalities
+  # that make the scenario faithful (app signer == instrument signer, app signer == baked
+  # digest, app signer != the committed test identity) BEFORE anything boots — a harness
+  # regression fails in seconds with a named cause instead of as a mystery on the emulator.
+  #
+  # API 35 AOSP on purpose: the rooted, stable, green-in-every-run configuration, so a failure
+  # here is about release-ness and not about the image.
+  premise-release:
+    name: Release E2E (API 35, AOSP, ephemeral release key)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: jvm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install the SDK packages this project needs
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null | sort -V | tail -1)
+          test -n "$SDKMANAGER" || { echo "sdkmanager not found under $ANDROID_HOME"; exit 1; }
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
+          if [ -w "$ANDROID_HOME" ]; then SUDO=""; else SUDO="sudo -E"; fi
+          yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "build-tools;37.0.0" 2>&1 | tail -5
+          [ -n "$SUDO" ] && sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME" || true
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Generate the ephemeral release identity
+        run: |
+          set -euo pipefail
+          # RSA-4096 / 30 days / PKCS12: shaped like a real distribution key (README's own
+          # keytool recipe) except for the validity, which is 30 days because this key must
+          # never outlive the run. The password goes to GITHUB_ENV, which subsequent steps read
+          # but the log never prints; it is ephemeral by design, so there is nothing to leak.
+          KS="$RUNNER_TEMP/understudy-ephemeral-release.p12"
+          PASS="$(openssl rand -hex 24)"
+          keytool -genkeypair -keystore "$KS" -storetype PKCS12 \
+            -alias understudy-release -keyalg RSA -keysize 4096 -validity 30 \
+            -dname "CN=Understudy CI Ephemeral Release, O=Understudy CI, C=US" \
+            -storepass "$PASS" -keypass "$PASS"
+          # The mechanism app/build.gradle.kts documents for operator release signing. Written
+          # here rather than committed: keystore.properties is gitignored precisely so a release
+          # identity is never in the repo — and this job must use the SAME mechanism an operator
+          # would, or it proves nothing about that path.
+          cat > keystore.properties <<EOF
+          storeFile=$KS
+          storePassword=$PASS
+          keyAlias=understudy-release
+          keyPassword=$PASS
+          storeType=PKCS12
+          EOF
+          {
+            echo "EPHEMERAL_KS=$KS"
+            echo "EPHEMERAL_KS_PASS=$PASS"
+          } >> "$GITHUB_ENV"
+          echo "ephemeral keystore written; its certificate:"
+          keytool -list -v -keystore "$KS" -storetype PKCS12 -storepass "$PASS" -alias understudy-release \
+            | grep -E "Alias name|Owner|Valid|SHA256:"
+
+      - name: Build the signed release app and its instrument
+        run: |
+          set -euo pipefail
+          # -Punderstudy.testBuildType=release makes the androidTest variant target (and be
+          # signed like) the release build. Without keystore.properties being picked up, the
+          # output would be app-release-UNSIGNED.apk and the find below would come back empty —
+          # a loud failure, which is the point of asserting on names below.
+          ./gradlew --no-daemon --console=plain -Punderstudy.testBuildType=release \
+            :app:assembleRelease :app:assembleReleaseAndroidTest
+          ls -l app/build/outputs/apk/release/ app/build/outputs/apk/androidTest/release/
+          test -f app/build/outputs/apk/release/app-release.apk \
+            || { echo "::error::app-release.apk missing — keystore.properties was not picked up, release stayed unsigned"; exit 1; }
+          test -n "$(find app/build/outputs/apk/androidTest/release -name '*.apk' | head -1)" \
+            || { echo "::error::no release androidTest APK was produced"; exit 1; }
+
+      - name: Verify the release artifacts are signed with the ephemeral key, and only it
+        run: |
+          set -euo pipefail
+          APP=app/build/outputs/apk/release/app-release.apk
+          TESTAPK=$(find app/build/outputs/apk/androidTest/release -name '*.apk' | head -1)
+          sha256_of() { apksigner verify --print-certs "$1" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1; }
+          APP_SHA="$(sha256_of "$APP")"
+          TEST_SHA="$(sha256_of "$TESTAPK")"
+          KEYTOOL_SHA="$(keytool -list -v -keystore "$EPHEMERAL_KS" -storetype PKCS12 \
+            -storepass "$EPHEMERAL_KS_PASS" -alias understudy-release \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | head -1 | tr -d ':' | tr 'A-F' 'a-f')"
+          COMMITTED_TEST_SHA="$(keytool -list -v -keystore keystore/understudy-test.p12 \
+            -storepass understudy -alias understudy \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | head -1 | tr -d ':' | tr 'A-F' 'a-f')"
+          echo "app=$APP_SHA"; echo "instrument=$TEST_SHA"; echo "ephemeral=$KEYTOOL_SHA"; echo "committed-test=$COMMITTED_TEST_SHA"
+          [ -n "$APP_SHA" ] && [ -n "$TEST_SHA" ] && [ -n "$KEYTOOL_SHA" ] && [ -n "$COMMITTED_TEST_SHA" ] \
+            || { echo "::error::could not extract one of the digests"; exit 1; }
+          [ "$APP_SHA" = "$KEYTOOL_SHA" ] \
+            || { echo "::error::the release APK is not signed with the ephemeral key"; exit 1; }
+          [ "$TEST_SHA" = "$APP_SHA" ] \
+            || { echo "::error::instrument APK signer differs from the app — am instrument would be refused"; exit 1; }
+          [ "$APP_SHA" != "$COMMITTED_TEST_SHA" ] \
+            || { echo "::error::release APK is signed with the COMMITTED test identity — this job would prove nothing"; exit 1; }
+          # Persist for the proxy-generation step's digest equality check.
+          echo "APP_CERT_SHA256=$APP_SHA" >> "$GITHUB_ENV"
+          echo "OK: release app + instrument share the ephemeral signer, and it is not the test identity"
+
+      - name: Generate the proxy APKs against the ephemeral release identity
+        run: |
+          set -euo pipefail
+          # Same two tests the debug jobs use, pointed at the ephemeral keystore:
+          #  * ProxyApkFactoryTest -> /tmp/proxy.apk signed WITH the ephemeral key (the
+          #    same-key/permission path, now for a release-signed definer);
+          #  * ProdSignedProxyTest -> /tmp/proxy-prodsign.apk signed with a fresh random key and
+          #    carrying the EPHEMERAL certificate's digest — the production layout, for real.
+          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest \
+            --tests '*ProxyApkFactoryTest*' --tests '*ProdSignedProxyTest*' --rerun-tasks \
+            -Punderstudy.appKeystore="$EPHEMERAL_KS" \
+            -Punderstudy.appKeystorePassword="$EPHEMERAL_KS_PASS" \
+            -Punderstudy.appKeystoreAlias=understudy-release
+          APK=$(find app/build/outputs/proxy-test -name 'proxy-*.apk' | head -1)
+          PRODSIGN=$(find app/build/outputs/proxy-prodsign -name 'proxy-prodsign-*.apk' | head -1)
+          test -n "$APK" && test -n "$PRODSIGN" || { echo "::error::proxy generation produced no artifacts"; exit 1; }
+          cp "$APK" /tmp/proxy.apk
+          cp "$PRODSIGN" /tmp/proxy-prodsign.apk
+          aapt2 dump badging /tmp/proxy.apk | grep '^package:'
+          aapt2 dump badging /tmp/proxy-prodsign.apk | grep '^package:'
+          sha256_of() { apksigner verify --print-certs "$1" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1; }
+          # The baked digest is read straight out of the artifact rather than out of a log line:
+          # it must equal the release app's certificate, or enforceCaller() on the device would
+          # (correctly) refuse every call and the suite would fail far from the cause.
+          BAKED="$(unzip -p /tmp/proxy-prodsign.apk assets/understudy-generator-cert.sha256)"
+          echo "baked generator digest: $BAKED"
+          echo "release app certificate: $APP_CERT_SHA256"
+          [ "$BAKED" = "$APP_CERT_SHA256" ] \
+            || { echo "::error::the prod-signed proxy carries digest $BAKED but the release app's certificate is $APP_CERT_SHA256"; exit 1; }
+          SAMEKEY="$(sha256_of /tmp/proxy.apk)"
+          [ "$SAMEKEY" = "$APP_CERT_SHA256" ] \
+            || { echo "::error::the same-key proxy is not signed with the ephemeral release key ($SAMEKEY != $APP_CERT_SHA256)"; exit 1; }
+          PRODKEY="$(sha256_of /tmp/proxy-prodsign.apk)"
+          [ "$PRODKEY" != "$APP_CERT_SHA256" ] \
+            || { echo "::error::prod-signed proxy shares the app's signer — the digest path would be untested"; exit 1; }
+          echo "OK: same-key proxy == release signer; prod-signed proxy differs and carries the release digest"
+
+      - name: Run the premise suite against the release build in a secondary profile
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          channel: stable
+          cores: 2
+          emulator-boot-timeout: 1200
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          script: .github/scripts/run-premise-test.sh 35
+        env:
+          ALLOW_NO_ROOT: 0
+          # The release build's identity: applicationId without the .debug suffix, and the
+          # release output directories. Same orchestration script, same suite, same assertions
+          # — the only variable is which app artifact it drives.
+          APP_PKG: dev.understudy
+          APP_APK_DIR: app/build/outputs/apk/release
+          TEST_APK_DIR: app/build/outputs/apk/androidTest/release
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: premise-results-release
+          path: |
+            app/build/outputs/androidTest-results/
+            app/build/reports/androidTests/
+            premise-logs/
+          if-no-files-found: warn
+          retention-days: 14

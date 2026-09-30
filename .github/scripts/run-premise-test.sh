@@ -372,9 +372,19 @@ log "install the app under test for user $USER_ID"
 await_framework "install app" || exit 1
 # `|| true` for the same reason: `find | head -1` can SIGPIPE, and an empty variable then fails at
 # the `adb install` below with a message that names the file, which is the useful place to fail.
-APP_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1 || true)"
-TEST_APK="$(find app/build/outputs/apk/androidTest/debug -name '*.apk' | head -1 || true)"
+# Parameterised so the release-E2E job can drive the identical orchestration against a
+# RELEASE-signed app (app-release.apk + app-release-androidTest.apk, applicationId without the
+# .debug suffix). Defaults are the debug outputs every existing job has always used.
+APP_APK_DIR="${APP_APK_DIR:-app/build/outputs/apk/debug}"
+TEST_APK_DIR="${TEST_APK_DIR:-app/build/outputs/apk/androidTest/debug}"
+APP_APK="$(find "$APP_APK_DIR" -name '*.apk' | head -1 || true)"
+TEST_APK="$(find "$TEST_APK_DIR" -name '*.apk' | head -1 || true)"
 echo "app=$APP_APK"; echo "test=$TEST_APK"
+if [ -z "$APP_APK" ] || [ -z "$TEST_APK" ]; then
+  echo "!! no APK found under $APP_APK_DIR or $TEST_APK_DIR — the build step did not produce them"
+  ls -laR app/build/outputs/apk 2>/dev/null | head -30 || true
+  exit 1
+fi
 adb install --user "$USER_ID" -r -t "$APP_APK" 2>&1 | tee premise-logs/install-app.log
 adb install --user "$USER_ID" -r -t "$TEST_APK" 2>&1 | tee premise-logs/install-test.log
 adb_fw pm list packages --user "$USER_ID" | grep -F "$APP_PKG" \
