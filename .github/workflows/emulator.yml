@@ -191,6 +191,7 @@ jobs:
             label: API 34, AOSP
             allow-no-root: 0
             disable-system-ui: 0
+            installer-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -203,6 +204,7 @@ jobs:
             label: API 35, AOSP
             allow-no-root: 0
             disable-system-ui: 0
+            installer-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -215,6 +217,7 @@ jobs:
             label: API 36, google_apis
             allow-no-root: 1
             disable-system-ui: 0
+            installer-phase: 1
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -245,6 +248,8 @@ jobs:
             label: API 37, google_apis — EXPERIMENTAL
             allow-no-root: 1
             disable-system-ui: 1
+            # No new phases on the job that is still fighting for a stable boot.
+            installer-phase: 0
             experimental: true
             boot-timeout: 900
             # Back to swiftshader_indirect. Run #44 tried angle_indirect and the emulator rejected
@@ -455,6 +460,9 @@ jobs:
           # RegionSampling) rather than trying to remove the capability, which cannot be done —
           # see the matrix comment and the block in run-premise-test.sh.
           DISABLE_SYSTEM_UI: ${{ matrix.disable-system-ui }}
+          # The in-app PackageInstaller phase (HANDOFF §3.4). Off on API 37 until that job can
+          # survive the phases it already has.
+          RUN_INSTALLER_PHASE: ${{ matrix.installer-phase }}
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -650,6 +658,10 @@ jobs:
           script: .github/scripts/run-premise-test.sh 35
         env:
           ALLOW_NO_ROOT: 0
+          # Explicit although 1 is the default: the release job is the MOST valuable place for
+          # the installer phase, because it is the only one where a session-installed proxy and
+          # a minified, release-signed app meet.
+          RUN_INSTALLER_PHASE: 1
           # The release build's identity: applicationId without the .debug suffix, and the
           # release output directories. Same orchestration script, same suite, same assertions
           # — the only variable is which app artifact it drives.

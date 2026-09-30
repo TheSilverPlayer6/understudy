@@ -927,6 +927,61 @@ echo "CALLER-AUTH VERIFIED on API $API: the app reached a proxy signed with a DI
 echo "  ($PRODSIGN_PKG) via the generator-certificate digest path."
 
 
+# --------------------------------------------------------------------------------------------
+# The in-app install path (HANDOFF §3.4). Everything above installed with `adb install --user`,
+# which proves the ARTIFACTS install; nothing before this point proved the APP can install —
+# the PackageInstaller session flow, the per-user REQUEST_INSTALL_PACKAGES appop, the
+# commit→broadcast round trip, and the bridge answering afterwards. The instrumented test does
+# all of it with the production classes; the shell's only job is the appop grant, which on a
+# real device is the user toggling "install unknown apps" in this profile's own Settings.
+# RUN_INSTALLER_PHASE=0 skips it — used on the API 37 job, which is still fighting for a
+# stable boot and should not grow new phases until it has survived its existing ones.
+# --------------------------------------------------------------------------------------------
+if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
+  INSTALLER_PKG="${INSTALLER_PKG:-com.example.installtarget}"
+  log "grant REQUEST_INSTALL_PACKAGES to the app for user $USER_ID (per-user appop)"
+  # appops is per-user and this grant is exactly what the Settings toggle writes. Shell can set
+  # it without root; on builds where it cannot, the test's canRequestInstalls() assertion names
+  # the cause rather than failing mysteriously at commit.
+  adb_fw appops set --user "$USER_ID" "$APP_PKG" REQUEST_INSTALL_PACKAGES allow || true
+  adb_fw appops get --user "$USER_ID" "$APP_PKG" REQUEST_INSTALL_PACKAGES || true
+
+  log "run the installer-session premise test as user $USER_ID"
+  adb logcat -c 2>/dev/null || true
+  adb logcat -v time > premise-logs/installer-logcat.log 2>&1 &
+  INSTALLER_LOGCAT_PID=$!
+  sleep 1
+  INSTALLER_VERDICT=0
+  run_instrument_phase premise-logs/installer-instrument.log \
+    --user "$USER_ID" \
+    -e installerTargetPackage "$INSTALLER_PKG" \
+    -e userId "$USER_ID" \
+    -e class dev.understudy.instrumented.InstallerSessionPremiseTest \
+    "$APP_PKG.test/$TEST_RUNNER" || INSTALLER_VERDICT=$?
+  log "installer instrument verdict=$INSTALLER_VERDICT (0=pass, 1=test failures, 2=guest crash/no result)"
+  sleep 2
+  kill "$INSTALLER_LOGCAT_PID" 2>/dev/null || true
+  wait "$INSTALLER_LOGCAT_PID" 2>/dev/null || true
+
+  log "installer diagnostics"
+  grep -hE "INSTALLER-DIAG|InstallResult|PackageInstaller" \
+    premise-logs/installer-instrument.log premise-logs/installer-logcat.log 2>/dev/null \
+    | sed -E 's/.*System\.out\( *[0-9]+\): //' | head -40 || echo "(no INSTALLER-DIAG lines found)"
+
+  if [ "$INSTALLER_VERDICT" -ne 0 ]; then
+    echo "!! installer-session verdict=$INSTALLER_VERDICT (1 = test failures, 2 = guest crashed or produced no result)"
+    grep -A25 -E "FAILURES!!!|Error in |INSTRUMENTATION_ABORTED" premise-logs/installer-instrument.log | head -70 || true
+    echo "!! INSTALLER-SESSION FAILED: the app could not install its own proxy through a"
+    echo "!!   PackageInstaller session in this profile. This is the production install path."
+    exit 1
+  fi
+  echo "INSTALLER-SESSION VERIFIED on API $API: the app staged, committed and received the"
+  echo "  result of its own proxy install ($INSTALLER_PKG) for user $USER_ID, and the bridge"
+  echo "  answered through the session-installed proxy."
+else
+  echo "-- installer-session phase SKIPPED (RUN_INSTALLER_PHASE=${RUN_INSTALLER_PHASE:-1}) --"
+fi
+
 log "teardown: uninstall the proxy KEEPING its data"
 await_framework "teardown" || exit 1
 # The data-preserving teardown the app cannot do unprivileged. Confirms `-k` really does leave
@@ -953,6 +1008,12 @@ else
 fi
 
 log "remove the test user"
+# The installer-phase proxy has served its purpose; remove it explicitly so a failed
+# remove-user does not leave a third package lingering on a snapshot someone reuses.
+if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
+  adb shell pm uninstall --user "$USER_ID" "${INSTALLER_PKG:-com.example.installtarget}" 2>&1 || true
+fi
+
 adb shell pm remove-user "$USER_ID" 2>&1 || true
 
 echo
