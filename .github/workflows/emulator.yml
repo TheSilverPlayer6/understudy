@@ -150,9 +150,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: jvm
-    # True only for the entry whose image has not booted yet; see the matrix comment. A job that
+    # True only for the entry whose image cannot pass yet; see the matrix comment. A job that
     # is allowed to fail must be labelled as such in its name, or a green run means nothing.
     continue-on-error: ${{ matrix.experimental }}
+    # The experimental entry (API 37) runs ONLY on workflow_dispatch. Its two blockers are
+    # upstream, measured, and documented in research/07 §3: the guest gfxstream assert Google
+    # declared intended behaviour (issuetracker 546200928 — both RegionSampling triggers are
+    # removed here, and no new aborts since run #50), and the image's secondary-user flow —
+    # the user reaches RUNNING_LOCKED and its CE storage never unlocks, which kills FUSE and
+    # every non-directBootAware component in that user. Run #53's sticky-unlock probe read
+    # the mechanism directly: a foreground switch STARTS the unlock (RUNNING_UNLOCKING at
+    # poll 4) and the framework then crashes mid-unlock. An indefinitely-red job on main
+    # trains everyone to ignore red — the project's own rule — so the harness stays
+    # dispatch-ready for the day Google ships a fixed android-37.x image:
+    # Actions → emulator → Run workflow.
+    if: ${{ !matrix.experimental || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -314,7 +326,17 @@ jobs:
             # Residual risk, stated plainly: task-snapshot readback on activity transitions and
             # screencap are also triggers, and this mitigation removes neither — the suite
             # launches no activities and takes no screenshots.
-
+            #
+            # OUTCOME (runs #50-#53): the graphics mitigation HOLDS — no new aborts after the
+            # disable phase in #50 or #53. The suite still cannot pass, for a second and
+            # independent upstream reason: the secondary user reaches RUNNING_LOCKED and its CE
+            # storage never unlocks (flags 0x400 vs the healthy 0x410), so its FUSE daemon is
+            # dead ("Transport endpoint is not connected") and every non-directBootAware
+            # component — including the proxy's provider — is unavailable even to root. The
+            # sticky-unlock probe measured the mechanism: foreground switch starts the unlock
+            # (RUNNING_UNLOCKING) and the framework crashes mid-unlock (#53). Hence the
+            # dispatch-only gate on this job: two documented upstream defects are not a red
+            # tick main should carry every push.
             #
             # Note the boot is also intermittently unstable on this image: runs #45 and #46 booted
             # and ran the suite, #44 and #47 never reached sys.boot_completed. So a red run here is
