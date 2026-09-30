@@ -643,6 +643,54 @@ private fun FilesScreen(viewModel: MainViewModel, state: SessionState) {
 
         Breadcrumb(path, viewModel)
 
+        // Process-death recovery: the journal found a transfer the previous process never
+        // finished. Only offered here (Ready/Dormant) because resuming needs a verified
+        // bridge, and the refusal copy in resumeTransfer() covers the not-same-session case.
+        val resumable by viewModel.resumableTransfer.collectAsStateWithLifecycle()
+        val resumeNotice by viewModel.resumeNotice.collectAsStateWithLifecycle()
+        resumable?.let { entry ->
+            Card(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                ),
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(
+                        "Interrupted ${entry.direction.name.lowercase()}",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        buildString {
+                            append("The app was killed during a ${entry.direction.name.lowercase()} ")
+                            append("for ${entry.targetPackage}")
+                            if (entry.filesTotal > 0) {
+                                append(" — ${entry.filesDone}/${entry.filesTotal} files had finished")
+                            } else {
+                                append(" before any file finished")
+                            }
+                            append(". Files already copied are skipped on resume.")
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (resumeNotice != null) {
+                        Text(
+                            resumeNotice!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = viewModel::dismissResumableTransfer) { Text("Dismiss") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = viewModel::resumeTransfer) { Text("Resume") }
+                    }
+                }
+            }
+        }
+
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
 
         if (error != null) {

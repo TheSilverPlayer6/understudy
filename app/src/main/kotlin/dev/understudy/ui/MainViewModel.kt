@@ -20,8 +20,10 @@ import dev.understudy.install.InstallResultReceiver
 import dev.understudy.shell.ShellCommands
 import dev.understudy.storage.SafDestination
 import dev.understudy.transfer.TransferEngine
+import dev.understudy.transfer.TransferJournal
 import dev.understudy.transfer.TransferProgress
 import dev.understudy.transfer.TransferResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -210,6 +212,88 @@ class MainViewModel(private val application: Application) : ViewModel() {
     private var engine: TransferEngine? = null
     private var transferJob: Job? = null
 
+    /**
+     * The transfer a previous process was running when it died, if any.
+     *
+     * Read once at construction — which is exactly the moment that matters, because the case
+     * being recovered from is "the app was killed and has just been rebuilt from nothing".
+     * Null while a transfer runs under this process (that one has live progress UI), and null
+     * after the user dismisses the offer.
+     */
+    private val journal: TransferJournal = container.transferJournal
+
+    private val _resumableTransfer = MutableStateFlow(journal.unfinished())
+    val resumableTransfer: StateFlow<TransferJournal.Entry?> = _resumableTransfer.asStateFlow()
+
+    private val _resumeNotice = MutableStateFlow<String?>(null)
+    /** Why a resume could not start, when it could not. The entry stays offered. */
+    val resumeNotice: StateFlow<String?> = _resumeNotice.asStateFlow()
+
+    /**
+     * Re-issues the journaled transfer after a process death.
+     *
+     * Preconditions are checked rather than assumed, and every refusal names what the user can
+     * do — a resume that silently no-ops is indistinguishable from a broken button:
+     *  - the session must be Ready *for the same package and user* the journal names, or the
+     *    bytes would flow to a different proxy than the half-copied tree belongs to;
+     *  - the SAF grant must still restore, or there is nowhere to put (pull) or read (push)
+     *    the bytes.
+     *
+     * A resumed pull is cheap by construction: [TransferEngine] skips destination files whose
+     * size already matches the plan. A resumed push re-copies the whole tree — the engine has
+     * no size-skip in that direction, and inventing one would risk leaving a truncated file
+     * *inside the save directory* looking restored. Slower and safe beats faster and lossy.
+     */
+    fun resumeTransfer() {
+        val entry = _resumableTransfer.value ?: return
+        val session = state.value
+        if (session !is SessionState.Ready ||
+            session.target.packageName != entry.targetPackage ||
+            session.target.userId != entry.userId
+        ) {
+            _resumeNotice.value =
+                "Re-establish the session for ${entry.targetPackage} (user ${entry.userId}) " +
+                "first — the proxy must be verified before its transfer can resume."
+            return
+        }
+        val uri = Uri.parse(entry.destinationUri)
+        val saf = SafDestination.restore(application, uri)
+        if (saf == null) {
+            _resumeNotice.value =
+                "The folder ${entry.destinationLabel.ifBlank { "used for the transfer" }} is no " +
+                "longer accessible — its permission grant did not survive. Pick the folder " +
+                "again, then start the transfer from the Files tab."
+            return
+        }
+        _resumeNotice.value = null
+        // Restore the exact context the journaled transfer ran in, then re-issue it through the
+        // normal code path so progress, cancellation and the journal itself behave identically.
+        _packageName.value = entry.targetPackage
+        _userId.value = entry.userId
+        _destination.value = Destination(uri, entry.destinationLabel)
+        _root.value = entry.root
+        _path.value = entry.relativePath
+        _resumableTransfer.value = null
+        when (entry.direction) {
+            dev.understudy.transfer.Direction.PULL -> pullCurrentTree()
+            dev.understudy.transfer.Direction.PUSH -> pushCurrentTree()
+        }
+        refreshListing()
+    }
+
+    /** The user does not want the offer; forget the interrupted transfer for good. */
+    fun dismissResumableTransfer() {
+        journal.clear()
+        _resumableTransfer.value = null
+        _resumeNotice.value = null
+    }
+
+    private fun outcomeOf(result: TransferResult): TransferJournal.Outcome = when {
+        result.cancelled -> TransferJournal.Outcome.CANCELLED
+        result.isSuccess -> TransferJournal.Outcome.DONE
+        else -> TransferJournal.Outcome.FAILED
+    }
+
     /** Copies everything under the current path out of the proxy into the chosen destination. */
     fun pullCurrentTree() {
         val bridge = sessions.bridge()
@@ -220,14 +304,46 @@ class MainViewModel(private val application: Application) : ViewModel() {
         val transfer = TransferEngine(bridge, saf)
         engine = transfer
         _lastResult.value = null
+        beginJournal(dev.understudy.transfer.Direction.PULL, destUri)
+        var journaledFiles = -1
 
         transferJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                transfer.pull(_root.value, _path.value) { p -> _progress.value = p }
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    transfer.pull(_root.value, _path.value) { p ->
+                        _progress.value = p
+                        // Per-file granularity: see TransferJournal's class doc.
+                        if (p.filesDone != journaledFiles) {
+                            journaledFiles = p.filesDone
+                            journal.update(p)
+                        }
+                    }
+                }
+                _lastResult.value = result
+                journal.finish(outcomeOf(result))
+                if (result.isSuccess) sessions.recordVerifiedPull(target(_packageName.value.trim()))
+            } catch (e: CancellationException) {
+                // Graceful cancellation (reset, ViewModel cleared) is NOT process death: it
+                // reaches this handler and records a terminal outcome, so the resume offer is
+                // only ever shown for a transfer that truly died with the process.
+                journal.finish(TransferJournal.Outcome.CANCELLED)
+                throw e
             }
-            _lastResult.value = result
-            if (result.isSuccess) sessions.recordVerifiedPull(target(_packageName.value.trim()))
         }
+    }
+
+    private fun beginJournal(direction: dev.understudy.transfer.Direction, destUri: Uri) {
+        journal.begin(
+            direction = direction,
+            root = _root.value,
+            relativePath = _path.value,
+            targetPackage = _packageName.value.trim(),
+            userId = _userId.value,
+            destinationUri = destUri.toString(),
+            destinationLabel = _destination.value?.label.orEmpty(),
+        )
+        _resumableTransfer.value = null
+        _resumeNotice.value = null
     }
 
     /**
@@ -281,12 +397,28 @@ class MainViewModel(private val application: Application) : ViewModel() {
 
             val transfer = TransferEngine(bridge, saf)
             engine = transfer
-            val result = withContext(Dispatchers.IO) {
-                transfer.push(_root.value, sources) { p -> _progress.value = p }
+            // Only journalled once we know a transfer will actually run: a journaled RUNNING
+            // entry is a promise that bytes were in flight, and "nothing to push" broke it.
+            beginJournal(dev.understudy.transfer.Direction.PUSH, destUri)
+            var journaledFiles = -1
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    transfer.push(_root.value, sources) { p ->
+                        _progress.value = p
+                        if (p.filesDone != journaledFiles) {
+                            journaledFiles = p.filesDone
+                            journal.update(p)
+                        }
+                    }
+                }
+                _lastResult.value = result
+                journal.finish(outcomeOf(result))
+                // Refresh so the user sees what landed, rather than a listing from before the push.
+                refreshListing()
+            } catch (e: CancellationException) {
+                journal.finish(TransferJournal.Outcome.CANCELLED)
+                throw e
             }
-            _lastResult.value = result
-            // Refresh so the user sees what landed, rather than a listing from before the push.
-            refreshListing()
         }
     }
 

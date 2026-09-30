@@ -9,6 +9,7 @@ import dev.understudy.install.ApkGenerator
 import dev.understudy.install.ProxyInstaller
 import dev.understudy.shell.ManualShellBackend
 import dev.understudy.shell.ShellBackend
+import dev.understudy.transfer.TransferJournal
 
 /**
  * Application-scoped container.
@@ -31,6 +32,13 @@ class UnderstudyApp : Application() {
     val apkGenerator: ApkGenerator by lazy { ApkGenerator(this) }
 
     val installer: ProxyInstaller by lazy { ProxyInstaller(this) }
+
+    /**
+     * Durable record of the transfer in flight. Application-scoped like [sessions] because the
+     * point is to outlive the process: after the platform kills the app mid-pull, the next
+     * launch reads this to offer a resume. See [TransferJournal].
+     */
+    val transferJournal: TransferJournal by lazy { TransferJournal(this) }
 
     /**
      * The active shell backend, or null when none is configured.
