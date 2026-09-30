@@ -150,6 +150,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: jvm
+    # True only for the entry whose image has not booted yet; see the matrix comment. A job that
+    # is allowed to fail must be labelled as such in its name, or a green run means nothing.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -187,21 +190,48 @@ jobs:
             target: default
             label: API 34, AOSP
             allow-no-root: 0
+            experimental: false
+            boot-timeout: 1200
+            extra-emulator-options: ""
           - api-level: 35
             target: default
             label: API 35, AOSP
             allow-no-root: 0
+            experimental: false
+            boot-timeout: 1200
+            extra-emulator-options: ""
           - api-level: 36
             target: google_apis
             label: API 36, google_apis
             allow-no-root: 1
+            experimental: false
+            boot-timeout: 1200
+            extra-emulator-options: ""
           # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
           # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
           # package that does not exist. The real id keeps the minor.
+          # Quoted above for a reason that turned out to be the ONLY thing needed to address the
+          # image: `system-images;android-37.0;google_apis;x86_64` installed and the AVD was built
+          # from it in runs #37 and #38. What then happened is that the emulator never booted:
+          # `adb: device offline` for the whole budget, no crash, no kernel output, nothing.
+          # 4096M of RAM and a 1200 s timeout changed nothing, and API 36 on the same action,
+          # emulator build and runner boots in about a minute.
+          #
+          # So this entry is EXPERIMENTAL and says so: `continue-on-error` keeps main green while
+          # the question is open, `-show-kernel` puts the guest kernel console in the job log,
+          # which is the only evidence that can distinguish "slow", "panicking" and "this image
+          # needs an emulator the stable channel has not shipped yet", and a short boot timeout
+          # keeps the cycle cheap. Guessing at fixes without that output is how this project spent
+          # six runs on a directory path. If the kernel log does not explain it, the job gets
+          # deleted and the blocker documented — a measured negative result is worth keeping, an
+          # indefinitely-red or indefinitely-ignored job is not.
           - api-level: "37.0"
             target: google_apis
-            label: API 37, google_apis
+            label: API 37, google_apis — EXPERIMENTAL
             allow-no-root: 1
+            experimental: true
+            boot-timeout: 420
+            extra-emulator-options: -show-kernel
     steps:
       - uses: actions/checkout@v4
 
@@ -301,11 +331,11 @@ jobs:
           # 600 was enough for every image that booted, but the budget is what turned a slow boot
           # into a hard failure with no diagnostic. Headroom costs nothing on a job that is
           # already the longest in the workflow.
-          emulator-boot-timeout: 1200
+          emulator-boot-timeout: ${{ matrix.boot-timeout }}
           # No snapshot: a restored one could carry a user profile or an install over from a
           # previous attempt and make a failing step look like it succeeded.
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect ${{ matrix.extra-emulator-options }}
           script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
         env:
           # 0 for the AOSP jobs, so losing root fails the run loudly instead of silently degrading
