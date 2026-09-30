@@ -193,6 +193,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+            channel: stable
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -203,6 +204,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+            channel: stable
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -213,6 +215,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+            channel: stable
             ram-size: ""
             disk-size: ""
             cores: 2
@@ -240,15 +243,18 @@ jobs:
             allow-no-root: 1
             experimental: true
             boot-timeout: 900
-            # ANGLE rather than the SwiftShader GLES translator. Run #43: surfaceflinger took
-            # SIGABRT in a loop (t=32s, 52s, 69s, 86s), each abort taking zygote and system_server
-            # with it, so `pm create-user` got Broken pipe forever. The emulator reported
-            # `vulkan_mode_selected:swiftshader gles_mode_selected:swiftshader` and then never
-            # reached the "Selecting Vulkan device" line that API 34 prints, which points at the
-            # graphics stack rather than at anything this project does. One variable at a time:
-            # only this job changes backend, and `-show-kernel` stays on so the next log says
-            # something whether or not this is the fix.
-            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu angle_indirect -show-kernel
+            # Back to swiftshader_indirect. Run #44 tried angle_indirect and the emulator rejected
+            # it outright —
+            #   ERROR | gpuChoiceBasedOnGpuOptions: Selected GPU option 'angle_indirect' is not
+            #           valid, switching to 'auto' mode.
+            #   INFO  | emuglConfig_init: vulkan_mode_selected:lavapipe gles_mode_selected:swangle
+            # — and surfaceflinger SIGABRT'd 14 times in 145 s anyway. So both graphics backends
+            # this emulator build offers produce the same abort, which moves the suspicion from the
+            # backend to the pairing of a brand-new system image with a stable-channel emulator
+            # (37.1.11.0). Hence `channel: canary` below: one variable, and the one that has not
+            # been tried. `-show-kernel` stays on either way.
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -show-kernel
+            channel: canary
             ram-size: 4096M
             disk-size: 6144M
             cores: 4
@@ -339,6 +345,10 @@ jobs:
           # rename-aside trick operates. There is no `default` image above API 35, so those levels
           # use google_apis, which turns out to be rootable anyway; see the matrix comment.
           target: ${{ matrix.target }}
+          # Per-matrix so only the failing job moves. `--channel=N` is inclusive, so canary still
+          # resolves the stable `system-images;android-37.0;google_apis;x86_64`; what it changes is
+          # the emulator build the action installs.
+          channel: ${{ matrix.channel }}
           arch: x86_64
           # `ram-size`, NOT `ram` — and getting that wrong is worth recording, because it cost two
           # runs and produced a confidently wrong conclusion. `ram` is not one of this action's 26
