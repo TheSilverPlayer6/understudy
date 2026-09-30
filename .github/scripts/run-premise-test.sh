@@ -129,10 +129,63 @@ BANNER
 fi
 # RAW_BASE is computed after the user exists; see the planting step.
 
+log "wait for the framework to be usable, not merely booted"
+# `sys.boot_completed=1` is what the emulator action waits for, and it is not sufficient. Run #41
+# on API 37: the guest reached system_server, the action proceeded, and at t=72s surfaceflinger
+# crashed — `init: Sending SIGKILL to service 'zygote'`, `crash_dump64`, system_server reaped. The
+# script was already running, so `pm create-user` hit a dying binder and came back with
+# "cmd: Failure calling service package: Broken pipe (32)".
+#
+# A framework restart during boot is a property of a software-rendered emulator on a 2-vCPU runner,
+# not of this project, and it can happen on any image. So poll until the package manager actually
+# answers, and only then continue.
+framework_ready() {
+  local out
+  out="$(adb shell pm list users 2>&1 || true)"
+  case "$out" in
+    *Broken*pipe*|*Service*not*found*|*device*offline*|*"Can't find service"*|"") return 1 ;;
+  esac
+  printf '%s' "$out" | grep -q "UserInfo{" || return 1
+  return 0
+}
+FRAMEWORK_OK=0
+for i in $(seq 1 60); do
+  if framework_ready; then
+    FRAMEWORK_OK=1
+    echo "framework answered after ${i} attempt(s):"
+    adb shell pm list users
+    break
+  fi
+  sleep 5
+done
+if [ "$FRAMEWORK_OK" != "1" ]; then
+  echo "!! the package manager never answered in 300 s; the framework is not coming up."
+  adb shell getprop sys.boot_completed
+  adb shell getprop init.svc.zygote
+  adb shell getprop init.svc.surfaceflinger
+  adb shell dmesg 2>/dev/null | tail -30 || true
+  exit 1
+fi
+
 log "create the secondary user profile"
-CREATE_OUT="$(adb shell pm create-user "$USER_NAME" 2>&1)"
-echo "$CREATE_OUT"
-USER_ID="$(printf '%s' "$CREATE_OUT" | grep -oE 'id [0-9]+' | grep -oE '[0-9]+' | head -1)"
+# Retried because "the framework answers" and "the framework will still be up in a second" are
+# different claims, and run #41 is the evidence for the difference.
+CREATE_OUT=""
+for attempt in 1 2 3 4; do
+  CREATE_OUT="$(adb shell pm create-user "$USER_NAME" 2>&1 || true)"
+  echo "attempt $attempt: $CREATE_OUT"
+  case "$CREATE_OUT" in
+    *"created user id"*) break ;;
+    *"already exists"*)  CREATE_OUT="$(adb shell pm list users 2>&1)"; break ;;
+  esac
+  sleep 15
+done
+# `|| true` is load-bearing. Under `set -euo pipefail` a grep that matches nothing makes the whole
+# command substitution fail, which kills the script HERE — before the diagnostic block below can
+# print anything. Run #41 proved it: `pm create-user` returned "Broken pipe" and the script exited
+# 224 having said nothing about why. A diagnostic that only runs when the thing it diagnoses did
+# not happen is not a diagnostic.
+USER_ID="$(printf '%s' "$CREATE_OUT" | grep -oE 'id [0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
 if [ -z "${USER_ID:-}" ]; then
   echo "!! could not parse a user id from: $CREATE_OUT"
   adb shell pm list users

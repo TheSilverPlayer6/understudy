@@ -195,6 +195,7 @@ jobs:
             extra-emulator-options: ""
             ram-size: ""
             disk-size: ""
+            cores: 2
           - api-level: 35
             target: default
             label: API 35, AOSP
@@ -204,6 +205,7 @@ jobs:
             extra-emulator-options: ""
             ram-size: ""
             disk-size: ""
+            cores: 2
           - api-level: 36
             target: google_apis
             label: API 36, google_apis
@@ -213,6 +215,7 @@ jobs:
             extra-emulator-options: ""
             ram-size: ""
             disk-size: ""
+            cores: 2
           # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
           # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
           # package that does not exist. The real id keeps the minor.
@@ -240,6 +243,7 @@ jobs:
             extra-emulator-options: -show-kernel
             ram-size: 4096M
             disk-size: 6144M
+            cores: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -341,6 +345,11 @@ jobs:
           # unchanged (the emulator auto-bumps them to 2560MB and logs "Increasing RAM size"), so
           # this changes exactly one variable on the one job that is failing.
           ram-size: ${{ matrix.ram-size }}
+          # Per-matrix for the same one-variable-at-a-time reason as ram-size and disk-size.
+          # The API 37 job gets the runner's full 4 vCPUs: its guest reached system_server and
+          # then surfaceflinger crashed during boot (run #41), which on a software-rendered
+          # emulator with 2 cores is a resource problem before it is anything else.
+          cores: ${{ matrix.cores }}
           # Same lesson as ram-size, learned one run later: verified against the action's source
           # (src/emulator-manager.ts pushes `disk.dataPartition.size=<value>` into config.ini)
           # rather than assumed from the input's name. Run #40 got the guest to 4 GB and it booted
