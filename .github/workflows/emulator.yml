@@ -253,7 +253,24 @@ jobs:
             # backend to the pairing of a brand-new system image with a stable-channel emulator
             # (37.1.11.0). Hence `channel: canary` below: one variable, and the one that has not
             # been tried. `-show-kernel` stays on either way.
-            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -show-kernel
+            # `-feature -ReadColorBufferDma` is aimed at the abort message rather than at a
+            # symptom. Run #44's crash dump — which is why the dump exists — gave:
+            #
+            #   F libc  : Fatal signal 6 (SIGABRT) in tid 570 (RegionSampling), pid 515 (surfaceflinger)
+            #   F DEBUG : Abort message: 'Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma'
+            #
+            # That assertion is in the GUEST's gfxstream encoder and it fires when the HOST
+            # advertises the ReadColorBufferDma capability: the API 37 image's encoder does not
+            # expect it. A host/guest capability mismatch, not a rendering-mode problem — which is
+            # why both backends already tried produced the identical abort (run #43
+            # swiftshader_indirect, run #44 ANGLE/lavapipe after `angle_indirect` was rejected as
+            # invalid and fell back to `auto`). Disabling the capability on the host side is the
+            # change that matches the evidence.
+            #
+            # Note the boot is also intermittently unstable on this image: runs #45 and #46 booted
+            # and ran the suite, #44 and #47 never reached sys.boot_completed. So a red run here is
+            # not by itself evidence about the fix; read the log for whether surfaceflinger aborted.
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -feature -ReadColorBufferDma -show-kernel
             channel: canary
             ram-size: 4096M
             disk-size: 6144M
