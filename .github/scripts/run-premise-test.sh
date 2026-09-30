@@ -235,33 +235,47 @@ adb shell pm list users 2>&1 || true
 # clear the guest's hasReadColorBufferDma bit (docker-android's measurements, yeshen.blog 164109821).
 #
 # So the capability cannot be turned off — but the TRIGGER can. The readback that kills
-# surfaceflinger comes from RegionSamplingThread, and the listener that drives it on a headless
-# CI guest is SystemUI's navbar luminance sampling. Two independent reports measured the same
-# mitigation: docker-android's crash loop (~1 abort/14 s) went to 0 after disabling SystemUI, and
-# LibreMediaConverter's run-e2e.sh gets through a full instrumented suite on API 37 with it
-# disabled (docs/api-37-emulator-crash.md). Residual risk: other readback callers (task snapshots
-# on activity transitions, screencap) can still abort — this suite launches no activities and
-# takes no screenshots, so nothing it does is a known trigger.
+# surfaceflinger comes from RegionSamplingThread, and on a headless CI guest exactly two apps
+# register CompositionSamplingListeners: SystemUI (navbar luminance) and the HOME app (icon
+# contrast). Run #49 is the evidence for needing BOTH: with SystemUI disabled the guest stayed
+# up through boot, user creation and start-user — then surfaceflinger SIGABRT'd in
+# RegionSampling again at 15:39:31, mid-suite, with only the launcher left to sample (run #48's
+# cascade had already shown nexuslauncher's RegionSamplingHelper dying alongside SystemUI's).
+# Two independent reports measured the SystemUI half of this mitigation: docker-android's crash
+# loop (~1 abort/14 s) went to 0, and LibreMediaConverter's run-e2e.sh gets through a full
+# instrumented suite on API 37 with it disabled (docs/api-37-emulator-crash.md). Residual risk:
+# other readback callers (task snapshots on activity transitions, screencap) can still abort —
+# this suite launches no activities and takes no screenshots, so nothing it does is a known
+# trigger, and the instrument phases retry once across a guest crash (run_instrument_phase).
 #
-# The framework is restarted afterwards so the already-crash-looping SystemUI dies with it rather
-# than respawning sampling listeners during the run. Off by default: on API 34/35/36 SystemUI is
-# innocent and disabling it would change what those jobs measure.
+# The framework is restarted afterwards so the already-crash-looping instances die with it
+# rather than respawning sampling listeners during the run. Off by default: on API 34/35/36
+# SystemUI and the launcher are innocent and disabling them would change what those jobs measure.
 if [ "${DISABLE_SYSTEM_UI:-0}" = "1" ]; then
-  log "disable SystemUI (gfxstream ReadColorBufferDma mitigation) and restart the framework"
+  log "disable the RegionSampling triggers (SystemUI + launcher) and restart the framework"
   adb_fw pm disable-user --user 0 com.android.systemui || true
-  adb_fw cmd package list packages -d | grep systemui || true
+  # Resolve the HOME package rather than hardcoding it: google_apis ships nexuslauncher, AOSP
+  # ships launcher3, and an image refresh can rename either. The fallback keeps the mitigation
+  # from silently doing nothing if the resolver output ever changes shape.
+  HOME_PKG="$(adb_fw cmd package resolve-activity -a android.intent.action.MAIN \
+      -c android.intent.category.HOME 2>/dev/null | tr -d '\r' \
+      | sed -n 's/.*packageName=\([A-Za-z0-9_.]*\).*/\1/p' | head -1 || true)"
+  case "$HOME_PKG" in ''|*[!A-Za-z0-9_.]*) HOME_PKG="com.google.android.apps.nexuslauncher" ;; esac
+  echo "home package resolved as: $HOME_PKG"
+  adb_fw pm disable-user --user 0 "$HOME_PKG" || true
+  adb_fw cmd package list packages -d || true
   # `stop; start` restarts zygote+system_server without touching the kernel or adb. Between the
   # two commands the device may vanish entirely, hence wait-for-device on both sides.
   adb shell stop || true
   adb wait-for-device
   adb shell start || true
   adb wait-for-device
-  if ! await_framework "after SystemUI disable + framework restart"; then
-    dump_guest_crashes "framework never came back after SystemUI disable"
+  if ! await_framework "after trigger disable + framework restart"; then
+    dump_guest_crashes "framework never came back after trigger disable"
     exit 1
   fi
-  dump_guest_crashes "after SystemUI disable"
-  echo "SystemUI disabled for user 0; framework restarted and answering."
+  dump_guest_crashes "after trigger disable"
+  echo "SystemUI + $HOME_PKG disabled for user 0; framework restarted and answering."
 fi
 
 log "create the secondary user profile"
@@ -307,12 +321,14 @@ echo "created user id $USER_ID"
 # is backed by. This is where the rename-aside trick really operates.
 RAW_BASE="/data/media/$USER_ID"
 
-# SystemUI runs PER USER, so disabling it for user 0 does not stop the new profile from starting
-# its own instance — which would re-register navbar RegionSampling listeners and re-arm the
-# gfxstream abort mid-run. Disabled here, before start-user, so user $USER_ID never launches it.
-# Best-effort: a failure here must not end the run, the await below is the load-bearing part.
+# SystemUI and the launcher run PER USER, so disabling them for user 0 does not stop the new
+# profile from starting its own instances — which would re-register RegionSampling listeners
+# and re-arm the gfxstream abort mid-run. Disabled here, before start-user, so user $USER_ID
+# never launches either. Best-effort: a failure here must not end the run, the await below is
+# the load-bearing part.
 if [ "${DISABLE_SYSTEM_UI:-0}" = "1" ]; then
   adb_fw pm disable-user --user "$USER_ID" com.android.systemui || true
+  adb_fw pm disable-user --user "$USER_ID" "${HOME_PKG:-com.google.android.apps.nexuslauncher}" || true
 fi
 
 log "start the new profile"
@@ -346,6 +362,83 @@ await_user_running() {
   adb shell pm list users 2>&1 || true
   adb shell dumpsys user 2>/dev/null | head -40 || true
   return 1
+}
+
+# ensure_user_running — a guest crash stops the secondary profile (run #49: user 11 lost its
+# "running" flag and its FUSE daemon after surfaceflinger took the framework down mid-suite,
+# so the NEXT phase tested a dead profile and reported bridge failures that were really
+# "nobody home"). Before any retry, put the profile back the way the phase expects it.
+ensure_user_running() {
+  local line
+  line="$(adb shell pm list users 2>/dev/null | tr -d '\r' | grep -E "UserInfo\{$USER_ID:" || true)"
+  case "$line" in
+    *running*) return 0 ;;
+  esac
+  echo "ensure_user_running: user $USER_ID is not running ($line); restarting it"
+  adb shell am start-user "$USER_ID" 2>&1 || true
+  await_user_running "$USER_ID" || return 1
+  await_framework "after user restart" || return 1
+  return 0
+}
+
+# instrument_verdict <logfile> — classifies one `am instrument` run.
+#   0 = the suite ran and passed   1 = real test failures   2 = guest environment failure
+#
+# WHITELIST, not blacklist. Run #49 is why: the guest crashed mid-suite, `am instrument`
+# printed "INSTRUMENTATION_ABORTED: System has crashed." — which the old
+# FAILURES!!!/INSTRUMENTATION_FAILED grep did not match — AND EXITED 0, so the phase was
+# silently green while nothing had been proven. That is the exact failure class this whole
+# workflow exists to avoid (run #30's silent degradation, `am instrument`'s exit-code lie in
+# HANDOFF §5.3), arriving through a new door. A pass now REQUIRES the runner's own positive
+# result line: "OK (N tests)". Anything else — abort, empty output, a truncated log — is an
+# environment failure, whatever the exit code says.
+instrument_verdict() {
+  local log="$1"
+  if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" "$log"; then
+    return 1
+  fi
+  if grep -qE "INSTRUMENTATION_ABORTED|System has crashed" "$log"; then
+    return 2
+  fi
+  if ! grep -qE "OK \([0-9]+ tests?" "$log"; then
+    return 2
+  fi
+  return 0
+}
+
+# run_instrument_phase <logfile> <am-instrument-args...> — runs one phase with ONE retry across
+# a guest crash (verdict 2). The retry is environmental, not evidential: test failures (1) are
+# never retried, and the retry only counts if it produces its own positive "OK (N tests)".
+# Retrying a crashed guest is legitimate; retrying a failed assertion would be hiding results.
+run_instrument_phase() {
+  local log="$1"; shift
+  local attempt verdict exit_code
+  for attempt in 1 2; do
+    if [ "$attempt" -gt 1 ]; then
+      echo "-- retrying the instrument phase after a guest crash (attempt $attempt) --"
+      await_framework "instrument retry" || return 2
+      ensure_user_running || return 2
+      dump_guest_crashes "before instrument retry"
+    fi
+    set +e
+    adb shell am instrument -w "$@" 2>&1 | tee "$log"
+    exit_code="${PIPESTATUS[0]}"
+    set -e
+    echo "am instrument exit=$exit_code (attempt $attempt) log=$log"
+    set +e
+    instrument_verdict "$log"
+    verdict=$?
+    set -e
+    case "$verdict" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) echo "!! attempt $attempt: no positive result line — the guest crashed or the"
+         echo "   runner printed nothing usable (exit=$exit_code). This is an environment"
+         echo "   failure, not a pass; a crash mid-suite must never be silently green."
+         dump_guest_crashes "instrument attempt $attempt" ;;
+    esac
+  done
+  return 2
 }
 await_user_running "$USER_ID" || exit 1
 # Starting a secondary profile restarts enough of the framework that the package service can be
@@ -710,17 +803,16 @@ log "run the instrumented premise test as user $USER_ID"
 await_framework "premise instrument" || exit 1
 # --user is what puts the test process inside the secondary profile, so the app and the proxy
 # share a uid space and the signature-level permission grant applies.
-set +e
-adb shell am instrument -w --user "$USER_ID" \
+PREMISE_VERDICT=0
+run_instrument_phase premise-logs/instrument.log \
+  --user "$USER_ID" \
   -e targetPackage "$TARGET_PKG" \
   -e userId "$USER_ID" \
   -e expectPlanted "$EXPECT_PLANTED" \
   -e class dev.understudy.instrumented.BridgePremiseTest \
-  "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/instrument.log
-INSTRUMENT_EXIT="${PIPESTATUS[0]}"
-set -e
+  "$APP_PKG.test/$TEST_RUNNER" || PREMISE_VERDICT=$?
 
-log "instrument exit=$INSTRUMENT_EXIT"
+log "premise instrument verdict=$PREMISE_VERDICT (0=pass, 1=test failures, 2=guest crash/no result)"
 sleep 2
 kill "$LOGCAT_PID" 2>/dev/null || true
 wait "$LOGCAT_PID" 2>/dev/null || true
@@ -758,6 +850,7 @@ else
 fi
 set -e
 
+
 log "diagnostic output from inside the app's own mount namespace"
 # The test app's view. Note this is evidence about the RESTRICTION, not about the mechanism:
 # the test app is a different uid from the proxy, so Android/data/<target> is supposed to be
@@ -774,15 +867,13 @@ grep -hE "SELF-DIAG" premise-logs/instrument.log premise-logs/logcat.log 2>/dev/
   | sed -E 's/.*System\.out\( *[0-9]+\): //; s/.*UnderstudyBridge\( *[0-9]+\): //' \
   | head -60 || echo "(no SELF-DIAG lines found)"
 
-# `am instrument` returns 0 even when tests fail; the authoritative signal is in the output.
-if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/instrument.log; then
-  echo "!! instrumented tests reported failures"
-  grep -A20 -E "FAILURES!!!|Error in " premise-logs/instrument.log | head -60 || true
+# The verdict is the whitelist from instrument_verdict, not a failure grep: run #49 proved
+# `am instrument` exits 0 through "INSTRUMENTATION_ABORTED: System has crashed." with no
+# failure line in sight. A pass requires the runner's own "OK (N tests)".
+if [ "$PREMISE_VERDICT" -ne 0 ]; then
+  echo "!! premise suite verdict=$PREMISE_VERDICT (1 = test failures, 2 = guest crashed or produced no result)"
+  grep -A20 -E "FAILURES!!!|Error in |INSTRUMENTATION_ABORTED" premise-logs/instrument.log | head -60 || true
   exit 1
-fi
-if [ "$INSTRUMENT_EXIT" -ne 0 ]; then
-  echo "!! am instrument exited $INSTRUMENT_EXIT"
-  exit "$INSTRUMENT_EXIT"
 fi
 
 log "run the PRODUCTION caller-auth premise test as user $USER_ID"
@@ -804,15 +895,14 @@ adb logcat -v time > premise-logs/callerauth-logcat.log 2>&1 &
 CALLERAUTH_LOGCAT_PID=$!
 sleep 1
 
-set +e
-adb shell am instrument -w --user "$USER_ID" \
+CALLERAUTH_VERDICT=0
+run_instrument_phase premise-logs/callerauth-instrument.log \
+  --user "$USER_ID" \
   -e prodTargetPackage "$PRODSIGN_PKG" \
   -e userId "$USER_ID" \
   -e class dev.understudy.instrumented.CallerAuthPremiseTest \
-  "$APP_PKG.test/$TEST_RUNNER" 2>&1 | tee premise-logs/callerauth-instrument.log
-CALLERAUTH_EXIT="${PIPESTATUS[0]}"
-set -e
-log "caller-auth instrument exit=$CALLERAUTH_EXIT"
+  "$APP_PKG.test/$TEST_RUNNER" || CALLERAUTH_VERDICT=$?
+log "caller-auth instrument verdict=$CALLERAUTH_VERDICT (0=pass, 1=test failures, 2=guest crash/no result)"
 sleep 2
 kill "$CALLERAUTH_LOGCAT_PID" 2>/dev/null || true
 wait "$CALLERAUTH_LOGCAT_PID" 2>/dev/null || true
@@ -826,19 +916,16 @@ log "confirm both proxies are still installed after the caller-auth phase"
 # A phase that ends by breaking the other proxy would be a very confusing way to fail later.
 adb shell pm list packages --user "$USER_ID" | grep -E "$TARGET_PKG|$PRODSIGN_PKG" || true
 
-if grep -qE "FAILURES!!!|Error in |INSTRUMENTATION_FAILED" premise-logs/callerauth-instrument.log; then
-  echo "!! production caller-auth test reported failures"
-  grep -A25 -E "FAILURES!!!|Error in " premise-logs/callerauth-instrument.log | head -70 || true
+if [ "$CALLERAUTH_VERDICT" -ne 0 ]; then
+  echo "!! production caller-auth verdict=$CALLERAUTH_VERDICT (1 = test failures, 2 = guest crashed or produced no result)"
+  grep -A25 -E "FAILURES!!!|Error in |INSTRUMENTATION_ABORTED" premise-logs/callerauth-instrument.log | head -70 || true
   echo "!! CALLER-AUTH FAILED: the app could not reach a proxy signed with a different key that"
   echo "!!   carries the app's certificate digest. In production that is every bridge call."
   exit 1
 fi
-if [ "$CALLERAUTH_EXIT" -ne 0 ]; then
-  echo "!! caller-auth am instrument exited $CALLERAUTH_EXIT"
-  exit "$CALLERAUTH_EXIT"
-fi
 echo "CALLER-AUTH VERIFIED on API $API: the app reached a proxy signed with a DIFFERENT key"
 echo "  ($PRODSIGN_PKG) via the generator-certificate digest path."
+
 
 log "teardown: uninstall the proxy KEEPING its data"
 await_framework "teardown" || exit 1

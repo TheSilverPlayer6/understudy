@@ -282,16 +282,29 @@ jobs:
             #     modes boot with 1-2 aborts; CI's swiftshader boots intermittently (#45, #46,
             #     #48 yes; #44, #47 no) and aborts once SystemUI comes up.
             #
-            # What CAN be removed is the trigger. On a headless CI guest the readback that kills
-            # surfaceflinger is RegionSamplingThread, driven by SystemUI's navbar luminance
-            # sampling. Both sources above measured disabling SystemUI as the mitigation:
-            # docker-android's crash loop (~1 abort/14 s) went to 0, and LibreMediaConverter's
-            # e2e script completes a full instrumented suite on API 37 with it disabled. That is
-            # `disable-system-ui: 1` below (handled in run-premise-test.sh: disable for user 0,
-            # restart the framework, disable for the secondary user before start-user). Residual
-            # risk, stated plainly: task-snapshot readback on activity transitions and screencap
-            # are also triggers, and this mitigation removes neither — the suite launches no
-            # activities and takes no screenshots, but boot itself does start a launcher.
+            # What CAN be removed is the trigger. The readback that kills surfaceflinger comes
+            # from RegionSamplingThread, and on a headless CI guest exactly two apps register
+            # CompositionSamplingListeners: SystemUI (navbar luminance) and the HOME app (icon
+            # contrast). Run #49 measured that ONE is not enough: with SystemUI disabled the
+            # guest survived boot, the framework restart, user creation and start-user — then
+            # surfaceflinger SIGABRT'd in RegionSampling AGAIN at 15:39:31, mid-suite, with only
+            # the launcher left to sample ("System has crashed", user 11's FUSE daemon down with
+            # it). So `disable-system-ui: 1` now disables SystemUI AND the resolved HOME package
+            # for user 0 and the secondary user, with a framework restart between (handled in
+            # run-premise-test.sh). External measurements of the SystemUI half: docker-android's
+            # crash loop (~1 abort/14 s) went to 0; LibreMediaConverter's e2e script completes a
+            # full instrumented suite on API 37 with it disabled.
+            #
+            # Run #49 also exposed a verdict bug this workflow must never ship again: the guest
+            # crash printed "INSTRUMENTATION_ABORTED: System has crashed." — which the old
+            # FAILURES/INSTRUMENTATION_FAILED grep did not match — while `am instrument` exited
+            # 0, so the premise phase was silently GREEN having proven nothing. All three
+            # instrument phases now demand the runner's positive "OK (N tests)" line and retry
+            # once across a guest crash (test failures are never retried).
+            #
+            # Residual risk, stated plainly: task-snapshot readback on activity transitions and
+            # screencap are also triggers, and this mitigation removes neither — the suite
+            # launches no activities and takes no screenshots.
             #
             # Note the boot is also intermittently unstable on this image: runs #45 and #46 booted
             # and ran the suite, #44 and #47 never reached sys.boot_completed. So a red run here is
