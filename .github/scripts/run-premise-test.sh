@@ -136,6 +136,20 @@ USER_ID="$(printf '%s' "$CREATE_OUT" | grep -oE 'id [0-9]+' | grep -oE '[0-9]+' 
 if [ -z "${USER_ID:-}" ]; then
   echo "!! could not parse a user id from: $CREATE_OUT"
   adb shell pm list users
+  # Run #40 died here on API 37 with "Cannot add user. Not enough space on disk. (code 5)" and the
+  # log said nothing about the disk, so the next step was a guess. UserManagerService checks
+  # allocatable bytes on /data before allowing a secondary profile; print the numbers that decide
+  # it, plus how many users this build permits at all, so a failure here names its own cause.
+  echo "-- /data and the host's view of it --"
+  adb shell df -h /data 2>&1 | head -5 || true
+  adb shell df -h 2>&1 | head -12 || true
+  echo "-- data partition size the AVD was created with --"
+  adb shell getprop ro.data.largefs 2>&1 || true
+  adb shell stat -f -c '%n blocks=%b free=%f size=%S' /data 2>&1 || true
+  echo "-- user limits on this build --"
+  adb shell pm get-max-users 2>&1 || true
+  # Headless-system-user builds refuse a secondary profile for different reasons; say which one.
+  adb shell getprop ro.fw.mu.headless 2>&1 || true
   exit 1
 fi
 echo "created user id $USER_ID"

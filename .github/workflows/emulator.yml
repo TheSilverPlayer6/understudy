@@ -194,6 +194,7 @@ jobs:
             boot-timeout: 1200
             extra-emulator-options: ""
             ram-size: ""
+            disk-size: ""
           - api-level: 35
             target: default
             label: API 35, AOSP
@@ -202,6 +203,7 @@ jobs:
             boot-timeout: 1200
             extra-emulator-options: ""
             ram-size: ""
+            disk-size: ""
           - api-level: 36
             target: google_apis
             label: API 36, google_apis
@@ -210,6 +212,7 @@ jobs:
             boot-timeout: 1200
             extra-emulator-options: ""
             ram-size: ""
+            disk-size: ""
           # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
           # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
           # package that does not exist. The real id keeps the minor.
@@ -236,6 +239,7 @@ jobs:
             boot-timeout: 900
             extra-emulator-options: -show-kernel
             ram-size: 4096M
+            disk-size: 6144M
     steps:
       - uses: actions/checkout@v4
 
@@ -337,6 +341,14 @@ jobs:
           # unchanged (the emulator auto-bumps them to 2560MB and logs "Increasing RAM size"), so
           # this changes exactly one variable on the one job that is failing.
           ram-size: ${{ matrix.ram-size }}
+          # Same lesson as ram-size, learned one run later: verified against the action's source
+          # (src/emulator-manager.ts pushes `disk.dataPartition.size=<value>` into config.ini)
+          # rather than assumed from the input's name. Run #40 got the guest to 4 GB and it booted
+          # all the way to system_server, then `pm create-user` failed with
+          # "Cannot add user. Not enough space on disk. (code 5)" — UserManagerService checks
+          # allocatable bytes on /data before allowing a secondary profile, and the API 37 image's
+          # default data partition is too small for one.
+          disk-size: ${{ matrix.disk-size }}
           # 600 was enough for every image that booted, but the budget is what turned a slow boot
           # into a hard failure with no diagnostic. Headroom costs nothing on a job that is
           # already the longest in the workflow.
