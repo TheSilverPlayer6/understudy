@@ -223,6 +223,47 @@ fi
 echo "framework answered:"
 adb shell pm list users 2>&1 || true
 
+# --------------------------------------------------------------------------------------------
+# DISABLE_SYSTEM_UI=1 — the API 37 gfxstream mitigation.
+#
+# The API 37 guest image asserts in mapper.ranchu (`!rcEnc->featureInfo()->hasReadColorBufferDma`)
+# on ANY host color-buffer readback, because the image's gralloc HAL was built expecting the host
+# NOT to advertise ReadColorBufferDma while every current emulator build does. Upstream calls this
+# intended behaviour (issuetracker 546200928, "Won't fix"; 557246813 is a duplicate), and the
+# obvious knobs are measured dead ends: `-feature -ReadColorBufferDma` is rejected by canary
+# 37.3.2.0 as "Bad feature name" (run #48's own log), and -GLDMA/-GLDMA2/-GLDirectMem do not
+# clear the guest's hasReadColorBufferDma bit (docker-android's measurements, yeshen.blog 164109821).
+#
+# So the capability cannot be turned off — but the TRIGGER can. The readback that kills
+# surfaceflinger comes from RegionSamplingThread, and the listener that drives it on a headless
+# CI guest is SystemUI's navbar luminance sampling. Two independent reports measured the same
+# mitigation: docker-android's crash loop (~1 abort/14 s) went to 0 after disabling SystemUI, and
+# LibreMediaConverter's run-e2e.sh gets through a full instrumented suite on API 37 with it
+# disabled (docs/api-37-emulator-crash.md). Residual risk: other readback callers (task snapshots
+# on activity transitions, screencap) can still abort — this suite launches no activities and
+# takes no screenshots, so nothing it does is a known trigger.
+#
+# The framework is restarted afterwards so the already-crash-looping SystemUI dies with it rather
+# than respawning sampling listeners during the run. Off by default: on API 34/35/36 SystemUI is
+# innocent and disabling it would change what those jobs measure.
+if [ "${DISABLE_SYSTEM_UI:-0}" = "1" ]; then
+  log "disable SystemUI (gfxstream ReadColorBufferDma mitigation) and restart the framework"
+  adb_fw pm disable-user --user 0 com.android.systemui || true
+  adb_fw cmd package list packages -d | grep systemui || true
+  # `stop; start` restarts zygote+system_server without touching the kernel or adb. Between the
+  # two commands the device may vanish entirely, hence wait-for-device on both sides.
+  adb shell stop || true
+  adb wait-for-device
+  adb shell start || true
+  adb wait-for-device
+  if ! await_framework "after SystemUI disable + framework restart"; then
+    dump_guest_crashes "framework never came back after SystemUI disable"
+    exit 1
+  fi
+  dump_guest_crashes "after SystemUI disable"
+  echo "SystemUI disabled for user 0; framework restarted and answering."
+fi
+
 log "create the secondary user profile"
 # Retried because "the framework answers" and "the framework will still be up in a second" are
 # different claims; runs #41 and #42 are the evidence, and #42 only got through on attempt 2.
@@ -265,6 +306,14 @@ echo "created user id $USER_ID"
 # The raw storage path for this user, i.e. what the FUSE mount at /storage/emulated/$USER_ID
 # is backed by. This is where the rename-aside trick really operates.
 RAW_BASE="/data/media/$USER_ID"
+
+# SystemUI runs PER USER, so disabling it for user 0 does not stop the new profile from starting
+# its own instance — which would re-register navbar RegionSampling listeners and re-arm the
+# gfxstream abort mid-run. Disabled here, before start-user, so user $USER_ID never launches it.
+# Best-effort: a failure here must not end the run, the await below is the load-bearing part.
+if [ "${DISABLE_SYSTEM_UI:-0}" = "1" ]; then
+  adb_fw pm disable-user --user "$USER_ID" com.android.systemui || true
+fi
 
 log "start the new profile"
 # switch-user brings it to the foreground, which is how the app will normally be used. We also

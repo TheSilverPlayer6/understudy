@@ -190,6 +190,7 @@ jobs:
             target: default
             label: API 34, AOSP
             allow-no-root: 0
+            disable-system-ui: 0
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -201,6 +202,7 @@ jobs:
             target: default
             label: API 35, AOSP
             allow-no-root: 0
+            disable-system-ui: 0
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -212,6 +214,7 @@ jobs:
             target: google_apis
             label: API 36, google_apis
             allow-no-root: 1
+            disable-system-ui: 0
             experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
@@ -241,6 +244,7 @@ jobs:
             target: google_apis
             label: API 37, google_apis — EXPERIMENTAL
             allow-no-root: 1
+            disable-system-ui: 1
             experimental: true
             boot-timeout: 900
             # Back to swiftshader_indirect. Run #44 tried angle_indirect and the emulator rejected
@@ -253,24 +257,48 @@ jobs:
             # backend to the pairing of a brand-new system image with a stable-channel emulator
             # (37.1.11.0). Hence `channel: canary` below: one variable, and the one that has not
             # been tried. `-show-kernel` stays on either way.
-            # `-feature -ReadColorBufferDma` is aimed at the abort message rather than at a
-            # symptom. Run #44's crash dump — which is why the dump exists — gave:
+            # ROOT CAUSE, finally established rather than hypothesised — and it is upstream's,
+            # declared intended behaviour. Run #44's crash dump gave:
             #
             #   F libc  : Fatal signal 6 (SIGABRT) in tid 570 (RegionSampling), pid 515 (surfaceflinger)
             #   F DEBUG : Abort message: 'Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma'
             #
-            # That assertion is in the GUEST's gfxstream encoder and it fires when the HOST
-            # advertises the ReadColorBufferDma capability: the API 37 image's encoder does not
-            # expect it. A host/guest capability mismatch, not a rendering-mode problem — which is
-            # why both backends already tried produced the identical abort (run #43
-            # swiftshader_indirect, run #44 ANGLE/lavapipe after `angle_indirect` was rejected as
-            # invalid and fell back to `auto`). Disabling the capability on the host side is the
-            # change that matches the evidence.
+            # The API 37 image's mapper.ranchu gralloc HAL was built expecting the host NOT to
+            # advertise ReadColorBufferDma, and every current emulator build advertises it, so any
+            # host color-buffer readback aborts the calling process. Google's tracker:
+            # 546200928 — "Won't fix (Intended behavior)" (557246813 is a duplicate). Waiting for
+            # a fix is therefore not a strategy.
+            #
+            # The capability cannot be turned off from here, measured three ways:
+            #   * `-feature -ReadColorBufferDma` (this job, run #48): canary 37.3.2.0 answers
+            #     "WARNING | [FeatureControl] Bad feature name: 'ReadColorBufferDma'" and carries
+            #     on — the flag was a silent no-op, which is why #48 aborted identically to #43.
+            #   * `-feature -GLDMA,-GLDMA2,-GLDirectMem` and `-HostComposition` (docker-android's
+            #     measurements, yeshen.blog 164109821): gfxstreamFeature GlDma goes to 0 but the
+            #     guest's hasReadColorBufferDma bit stays set. No effect on the abort.
+            #   * GPU backend choice: irrelevant to WHETHER the assert exists. It decides how
+            #     often the bad path is hit — LibreMediaConverter's 7-run matrix
+            #     (docs/api-37-emulator-crash.md) found host GLES never boots while ANGLE-based
+            #     modes boot with 1-2 aborts; CI's swiftshader boots intermittently (#45, #46,
+            #     #48 yes; #44, #47 no) and aborts once SystemUI comes up.
+            #
+            # What CAN be removed is the trigger. On a headless CI guest the readback that kills
+            # surfaceflinger is RegionSamplingThread, driven by SystemUI's navbar luminance
+            # sampling. Both sources above measured disabling SystemUI as the mitigation:
+            # docker-android's crash loop (~1 abort/14 s) went to 0, and LibreMediaConverter's
+            # e2e script completes a full instrumented suite on API 37 with it disabled. That is
+            # `disable-system-ui: 1` below (handled in run-premise-test.sh: disable for user 0,
+            # restart the framework, disable for the secondary user before start-user). Residual
+            # risk, stated plainly: task-snapshot readback on activity transitions and screencap
+            # are also triggers, and this mitigation removes neither — the suite launches no
+            # activities and takes no screenshots, but boot itself does start a launcher.
             #
             # Note the boot is also intermittently unstable on this image: runs #45 and #46 booted
             # and ran the suite, #44 and #47 never reached sys.boot_completed. So a red run here is
-            # not by itself evidence about the fix; read the log for whether surfaceflinger aborted.
-            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -feature -ReadColorBufferDma -show-kernel
+            # not by itself evidence about the fix; read the log for whether surfaceflinger aborted
+            # AFTER the "disable SystemUI" phase — an abort before it is the old crash loop during
+            # boot, which the framework restart is designed to end, not prevent.
+            emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -show-kernel
             channel: canary
             ram-size: 4096M
             disk-size: 6144M
@@ -410,6 +438,10 @@ jobs:
           # is available today but is a property of the image Google published rather than
           # something we control; see the matrix comment.
           ALLOW_NO_ROOT: ${{ matrix.allow-no-root }}
+          # API 37 only: removes the trigger for the guest gfxstream abort (SystemUI's navbar
+          # RegionSampling) rather than trying to remove the capability, which cannot be done —
+          # see the matrix comment and the block in run-premise-test.sh.
+          DISABLE_SYSTEM_UI: ${{ matrix.disable-system-ui }}
 
       - uses: actions/upload-artifact@v4
         if: always()
