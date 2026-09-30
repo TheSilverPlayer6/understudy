@@ -555,9 +555,20 @@ log "storage + component state of user $USER_ID (diagnostic, all levels)"
 # ends by force-stopping the proxy, so the suite still faces the exact cold state it would
 # have faced without this block.
 echo "-- user state --"
-USER_STATE_LINE="$(adb shell "dumpsys user 2>/dev/null" | grep -A2 "UserInfo{$USER_ID:" | grep -oE "State: [A-Z_]+" | head -1 || true)"
+# user_state reads the per-user "State:" line from dumpsys user with awk: run #52 proved a
+# grep -A2 window is too small — the real dump interleaves other lines between the UserInfo
+# header and its State, so the extraction came back empty and the LOCKED probe below never
+# fired on the one level that needed it. Scan forward to the first State: instead, and strip
+# \r (adb shell adds it) before any pattern sees the text.
+user_state() {
+  adb shell dumpsys user 2>/dev/null | tr -d '\r' | awk -v u="$USER_ID" '
+    $0 ~ ("UserInfo\\{" u ":") { found=1 }
+    found && /State:/ { sub(/^[ \t]*State:[ \t]*/, ""); print; exit }
+  ' || true
+}
+USER_STATE="$(user_state)"
 adb shell "dumpsys user 2>/dev/null | grep -E 'UserInfo\{$USER_ID|State|running|initialized|unlocked' | head -12" 2>&1 || true
-echo "user $USER_ID state: ${USER_STATE_LINE:-<unreadable>}"
+echo "user $USER_ID state: ${USER_STATE:-<unreadable>}"
 # API 37's premise failure (runs #45-#51) reduces to this line: the secondary user reaches
 # RUNNING_LOCKED and its CE storage NEVER unlocks — flags stay 0x400 without the 0x010
 # INITIALIZED bit, the FUSE daemon for the user dies ("Transport endpoint is not connected"),
@@ -572,23 +583,29 @@ echo "user $USER_ID state: ${USER_STATE_LINE:-<unreadable>}"
 # normally unlocks credential-less secondary users automatically, and becoming current re-drives
 # UserController's unlock path. CE unlock is STICKY, so if it works we switch straight back and
 # the suite still runs against a background user — the harder case every other level passes.
-if printf '%s' "$USER_STATE_LINE" | grep -q "LOCKED"; then
+# Exact-state dispatch, and order matters: RUNNING_UNLOCKED *contains* the substring LOCKED,
+# so a grep -q LOCKED here would "fix" healthy levels. Only a genuinely locked state probes.
+case "$USER_STATE" in
+  *UNLOCKED*) : ;;
+  *LOCKED*)
   echo "!! user $USER_ID is RUNNING_LOCKED: CE storage never unlocked. Probing the"
   echo "   foreground-switch workaround (one variable, logged before and after)."
   adb shell am switch-user "$USER_ID" 2>&1 | head -3 || true
   for i in $(seq 1 20); do
-    st="$(adb shell "dumpsys user 2>/dev/null" | grep -A2 "UserInfo{$USER_ID:" | grep -oE "State: [A-Z_]+" | head -1 || true)"
+    st="$(user_state)"
     echo "unlock poll $i: ${st:-<unreadable>}"
-    printf '%s' "$st" | grep -q "RUNNING_UNLOCKED" && break
+    [ "$st" = "RUNNING_UNLOCKED" ] && break
     sleep 3
   done
   echo "-- switching back to user 0; CE unlock is sticky if it happened --"
   adb shell am switch-user 0 2>&1 | head -3 || true
   sleep 3
-  adb shell "dumpsys user 2>/dev/null | grep -A2 'UserInfo{$USER_ID:'" 2>&1 | head -6 || true
+  echo "state after switch-back: $(user_state)"
   echo "-- does the proxy's storage work now? --"
   adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
-fi
+  ;;
+  *) echo "state '${USER_STATE:-<unreadable>}' is neither LOCKED nor UNLOCKED; no probe applies" ;;
+esac
 echo "-- volumes + mounts --"
 adb shell sm list-volumes 2>&1 | head -8 || true
 adb shell "mount 2>/dev/null | grep -E '/storage/emulated|/mnt/pass_through/$USER_ID|/mnt/runtime/[a-z]*/emulated/$USER_ID' | head -10" 2>&1 || true
@@ -1052,6 +1069,16 @@ if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
     sleep 2
   done
   echo "current user: $(adb shell am get-current-user 2>&1 | tr -d '\r' || true)"
+  # And the profile must count as provisioned, or the platform shows the confirmation and then
+  # declines to keep it: run #52's logcat is the evidence — "Displayed
+  # com.android.packageinstaller/.PackageInstallerActivity for user 10: +544ms" immediately
+  # followed by "D/ActivityTaskManager: Skipping, user setup not complete", and the hierarchy
+  # dump 20 s later contains nothing but the status bar. A `pm create-user` profile never ran
+  # a setup wizard, so USER_SETUP_COMPLETE is 0 and task resume is suppressed for it. This is
+  # the standard emulator-CI remedy; it is set here rather than at create-user so the phases
+  # above keep testing the exact profile state they always tested.
+  adb shell settings put --user "$USER_ID" secure user_setup_complete 1 2>&1 || true
+  echo "user_setup_complete=$(adb shell settings get --user "$USER_ID" secure user_setup_complete 2>&1 | tr -d '\r' || true)"
 
   log "run the installer-session premise test as user $USER_ID"
   adb logcat -c 2>/dev/null || true

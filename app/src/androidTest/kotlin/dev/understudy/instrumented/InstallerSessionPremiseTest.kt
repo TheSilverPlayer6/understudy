@@ -155,15 +155,23 @@ class InstallerSessionPremiseTest {
                 confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(confirmation)
 
-                // The platform's dialog, tapped by the test. Button text is matched exactly
-                // ("Install", en-US AOSP/google_apis images); anything else dumps the visible
-                // hierarchy into the log before failing, so a wording change is diagnosable
-                // from the artifact rather than from a timeout.
+                // The platform's dialog, tapped by the test. Selector cascade rather than one
+                // guess: the AOSP and Google builds of the installer share the `ok_button` id
+                // but not the package name, and text can differ by build. Whichever matches is
+                // tapped; if none does, the hierarchy dump below says what was on screen
+                // instead, so a wording or id change is diagnosable from the artifact rather
+                // than from a timeout.
                 val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-                val installButton = device.wait(
-                    Until.findObject(By.text("Install")),
-                    CONFIRMATION_TIMEOUT_MS,
-                )
+                val installButton =
+                    device.wait(Until.findObject(By.text("Install")), CONFIRMATION_TIMEOUT_MS)
+                        ?: device.wait(
+                            Until.findObject(By.res("com.android.packageinstaller", "ok_button")),
+                            5_000,
+                        )
+                        ?: device.wait(
+                            Until.findObject(By.res("com.google.android.packageinstaller", "ok_button")),
+                            5_000,
+                        )
                 if (installButton == null) {
                     println("INSTALLER-DIAG confirmation window hierarchy dump follows")
                     val dumpFile = java.io.File(context.cacheDir, "installer-hierarchy.xml")
