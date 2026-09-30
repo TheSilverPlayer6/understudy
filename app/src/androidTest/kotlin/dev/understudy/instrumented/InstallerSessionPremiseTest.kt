@@ -155,15 +155,19 @@ class InstallerSessionPremiseTest {
                 confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(confirmation)
 
-                // The platform's dialog, tapped by the test. Selector cascade rather than one
-                // guess: the AOSP and Google builds of the installer share the `ok_button` id
-                // but not the package name, and text can differ by build. Whichever matches is
-                // tapped; if none does, the hierarchy dump below says what was on screen
-                // instead, so a wording or id change is diagnosable from the artifact rather
-                // than from a timeout.
+                // The platform's dialog, tapped by the test. Selector cascade, because run
+                // #53's hierarchy dump proved the button text differs by installer build:
+                // AOSP's alert dialog says "INSTALL" (all caps, android:id/button1), the
+                // Google installer on API 36 says "Install" (ok_button). A case-insensitive
+                // exact-word pattern covers both; the id fallbacks cover a future restyling
+                // that drops the word. If nothing matches, the hierarchy dump below says what
+                // was on screen instead, so the next change is diagnosable from the artifact.
                 val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
                 val installButton =
-                    device.wait(Until.findObject(By.text("Install")), CONFIRMATION_TIMEOUT_MS)
+                    device.wait(
+                        Until.findObject(By.text(java.util.regex.Pattern.compile("(?i)^install$"))),
+                        CONFIRMATION_TIMEOUT_MS,
+                    )
                         ?: device.wait(
                             Until.findObject(By.res("com.android.packageinstaller", "ok_button")),
                             5_000,
