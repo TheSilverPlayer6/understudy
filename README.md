@@ -280,10 +280,12 @@ secondary profile, on two API levels, in CI on every push: `PREMISE VERIFIED on 
   no digest asset the proxy falls back to permission-only enforcement, and that fallback is an
   explicit test rather than an accident.
 
-  What remains unverified is a genuine *release* key end to end. CI signs the app with the committed
-  test keystore and the production-shaped proxy with a fresh random key, so both the permission
-  path and the digest path are exercised — but never with the app signed by a real distribution
-  key. That is a one-run check once a keystore exists.
+  **This is now device-verified.** `CallerAuthPremiseTest` runs on API 34 and API 35 emulators in
+  CI against a proxy signed with a fresh random key, and reports `holdsBridge=GRANTED` plus an
+  `ownCertificateSha256` equal to the digest baked into that proxy — gate 1 open because `:app`
+  defines the permission, gate 2 satisfied by the digest. What remains unverified is a genuine
+  *release* key: CI signs the app with the committed test keystore, so the digest is the test
+  certificate's. The mechanism is key-agnostic, and that is a one-run check once a keystore exists.
 * **Debug and release builds cannot be installed at the same time**, because both define
   `dev.understudy.permission.BRIDGE` and a permission name may be defined by only one package on
   the device. The same applies when upgrading over a build that left an *old* proxy installed —

@@ -89,8 +89,20 @@ two `premise` jobs boot KVM emulators on API 34 and API 35 and report `OK (11 te
 `PREMISE VERIFIED`.
 
 Runs #18–#27 were green end to end. **#28 and #29 were red**, and are the reason milestone 5
-exists; the commit after #29 is the fix and the next run confirms it. Section 4 records milestone
-4, section 4b records what #28 and #29 turned up.
+exists. **#31 is green on all three jobs**, and on both API levels reports:
+
+```
+OK: 2 proxies coexist for user 10
+OK (11 tests)   BridgePremiseTest          OK (2 tests)   CallerAuthPremiseTest
+CALLER-AUTH VERIFIED: the app reached a proxy signed with a DIFFERENT key
+PREMISE VERIFIED                           OK: 'pm uninstall -k' preserved the data directory
+PREMISE-DIAG queryIntentReceivers(dev.understudy.action.PROXY_DISCOVERY)
+  = OK ([com.example.prodgame, com.example.targetgame])
+CALLERAUTH-DIAG holdsBridge=GRANTED · ownCertificateSha256=bdbdca70… (matches the baked digest)
+```
+
+Section 4 records milestone 4, section 4b records what #28 and #29 turned up, and
+`research/06` §5b has the full evidence.
 
 ### Components
 
@@ -350,6 +362,35 @@ short of reinstalling the proxy. `CallerVerdictCache` now stores positives only,
 * `dumpsys package permission`, `dumpsys package queries` and `cmd package query-receivers` are
   captured every run, so the next visibility failure arrives with the platform's own answer;
 * both proxies are asserted installed side by side. Coexistence is the product.
+
+### Confirmed on a device (CI run #31, API 34 and API 35)
+
+Both defects are closed and the mechanism doing the work is identified rather than assumed:
+`queryIntentReceivers(PROXY_DISCOVERY)` returns **both** proxies to an app holding no
+`QUERY_ALL_PACKAGES`, and once the package is visible every other query API follows — including
+`resolveContentProvider`, the one that had been failing. `CallerAuthPremiseTest` reports
+`holdsBridge=GRANTED` against a proxy signed with a *different* key, and its
+`ownCertificateSha256` equals the digest baked into that proxy — the production authorisation path
+running on a device for the first time, with the two numbers that prove it.
+
+Still outstanding: a genuine *release* key. CI signs the app with the committed test keystore, so
+the digest is the test certificate's. The mechanism is key-agnostic, but one end-to-end pass with a
+real distribution key is owed once `keystore.properties` exists.
+
+### Run #30's API 35 failure was not a product failure
+
+`adb root` returned non-zero on its single attempt while adbd was restarting, so `HAVE_ROOT=0`, so
+neither planting route could work, and the run died before any test executed. The script then
+printed "adb root unavailable (production-signed image)" — a confident statement of a cause it had
+not established, on a `target: default` image that runs #18 and #29 had rooted fine. `adb root` is
+now retried six times with `wait-for-device` between attempts, success is confirmed by checking
+`id -u` rather than trusting the exit code (it is also 0 for "already running as root"), and a
+genuine failure prints `ro.build.type`/`ro.build.tags`/`ro.debuggable` instead of guessing.
+
+The same log review found that the caller-auth phase reported "(no CALLERAUTH-DIAG lines found)"
+*while passing*: those lines go to logcat via `System.out`, and the logcat capture had been killed
+after the previous phase. The diagnostics written to explain a caller-auth failure were absent in
+the only place they would ever be needed. Capture now restarts around that phase.
 
 ## 5. Things that will bite you
 

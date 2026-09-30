@@ -1,7 +1,6 @@
 # Milestone 5 — who owns the bridge permission, and who can see whom
 
-Date: 2026-09-29/30 · Status: **fix implemented and verified on the JVM; the device confirmation is
-CI run #30**
+Date: 2026-09-30 · Status: **green — CI run #31, all three jobs, on API 34 and API 35**
 
 Milestone 4 proved the premise. This one is about the two things that stop the premise from being
 *usable*: a signed release build that cannot talk to the proxy it generated, and a device on which
@@ -290,6 +289,75 @@ The mirror-image case is also worth knowing: upgrading Understudy while a proxy 
 *older* build is still installed fails the same way, because that old proxy still defines `BRIDGE`.
 Uninstall the old proxies first. Nothing shipped before this, so it is a CI and developer concern
 rather than a user one.
+
+---
+
+## 5b. Verified — CI run #31, both API levels
+
+```
+OK: 2 proxies coexist for user 10                                  API 34 and API 35
+OK (11 tests)                                                      BridgePremiseTest
+OK (2 tests)                                                       CallerAuthPremiseTest
+CALLER-AUTH VERIFIED on API 34: the app reached a proxy signed with a DIFFERENT key
+CALLER-AUTH VERIFIED on API 35: the app reached a proxy signed with a DIFFERENT key
+PREMISE VERIFIED on API 34 / on API 35
+OK: 'pm uninstall -k' preserved the data directory
+```
+
+Both defects from §1 are closed on a real Android system, and the visibility mechanism from §2.3 is
+confirmed to be the one doing the work:
+
+```
+PREMISE-DIAG   queryIntentReceivers(dev.understudy.action.PROXY_DISCOVERY)
+                 = OK ([com.example.prodgame, com.example.targetgame])
+PREMISE-DIAG   getPackageInfo         = OK (PackageInfo{… com.example.targetgame})
+PREMISE-DIAG   resolveContentProvider = OK (ContentProviderInfo{name=com.example.targetgame
+                                    className=dev.understudy.proxytpl.bridge.ProxyFileBridge})
+PREMISE-DIAG   getLaunchIntentForPackage = OK (… cmp=com.example.targetgame/…ProxyStatusActivity)
+```
+
+`<queries><intent>` resolves **both** proxies from an app holding no `QUERY_ALL_PACKAGES`, and once
+the package is visible every other query API follows — including `resolveContentProvider`, which is
+the one that was failing. So the fix is not merely sufficient; it restores the whole surface.
+
+### The two gates, with the actual numbers
+
+`CallerAuthPremiseTest` prints which gate produced any failure. On a green run it prints this
+instead, and the two digests are the whole proof:
+
+```
+CALLERAUTH-DIAG target=com.example.prodgame uid=1010141 userId=10
+CALLERAUTH-DIAG holdsBridge=GRANTED (dev.understudy.permission.BRIDGE)
+CALLERAUTH-DIAG ownCertificateSha256=bdbdca70b0d38d4a23d2193af23e5f1fd1355155ef2dfd5bf06342be248545fa
+CALLERAUTH-DIAG ping OK: package=com.example.prodgame user=10 protocol=1
+                 roots=[DATA exists=true /storage/emulated/10/Android/data/com.example.prodgame, …]
+CALLERAUTH-DIAG mkdirs+query+openFile round trip OK
+                 (PathStat(exists=true, isDirectory=false, sizeBytes=47,
+                  canonicalPath=/storage/emulated/10/Android/data/com.example.prodgame/
+                                callerauth-probe/round-trip.txt))
+```
+
+* **Gate 1 — `holdsBridge=GRANTED`** while the proxy is signed with a *different* key
+  (`apksigner` reports `O=Understudy, CN=Understudy PerInstall`, certificate SHA-256
+  `79b6131e…`, against the app's `bdbdca70…`). Before §1.3 that was impossible: the proxy defined
+  the permission, so only packages sharing its throwaway key could hold it. This line is the
+  entire point of moving the definition.
+* **Gate 2 — `ownCertificateSha256=bdbdca70…`** equals the digest `ProdSignedProxyTest` baked into
+  the proxy's `assets/understudy-generator-cert.sha256`. The proxy compared the calling uid's
+  certificate against it and let the call through, which is the production authorisation path
+  running on a device for the first time.
+* The round trip covers `call(mkdirs)`, `openFile` both ways, `query` and `call(statPath)` — every
+  gated entry point — and `statPath`'s canonical path plus byte count confirm the write reached
+  the real filesystem, reported by the only process that can see it.
+
+What this still does not cover: a genuine *release* signing key. CI signs the app with the
+committed test keystore, so `bdbdca70…` is the test certificate. The mechanism is key-agnostic —
+the generator bakes whatever its own certificate hashes to — but the end-to-end pass with a real
+distribution key is still outstanding, and needs one run once `keystore.properties` exists.
+
+Also worth recording: `adb root succeeded on attempt 1` on both jobs. Run #30's API 35 failure was
+a single un-retried `adb root` losing a race with adbd's restart, not an image problem; §4 of the
+commit that fixed it has the detail.
 
 ---
 

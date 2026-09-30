@@ -193,16 +193,24 @@ class ProxyApkFactory(private val identity: SigningIdentity) {
         /**
          * Where the generator's certificate digest travels inside the APK.
          *
-         * Why this exists: the bridge provider is guarded by a `signature`-level permission,
-         * which the platform grants only when the caller and the *provider* share a signing
-         * certificate. In production they cannot. The proxy is signed with a per-install
-         * [SigningIdentity] key generated on the device, while Understudy is signed at build
-         * time with whatever key distributed it — so a release build would install a proxy that
-         * refuses every call from the app that made it. The permission is still worth keeping
-         * (it costs nothing, and covers the CI/debug configuration where both APKs really do
-         * share the committed test key), but it cannot be the only check. This asset lets the
-         * proxy verify the caller against the certificate of the app that generated it, which
-         * is the relationship that actually matters.
+         * Why this exists: the bridge provider is guarded by the `signature`-level
+         * `dev.understudy.permission.BRIDGE`, which `:app` defines. A signature permission is
+         * granted to packages signed like its **definer**, so the app holds it trivially and the
+         * platform gate opens — which is exactly what makes it useless as an *identity* check: it
+         * admits any build signed with Understudy's release key, not the install that made this
+         * proxy. And it cannot be tightened by moving the definition to the proxy, because then
+         * the app could never hold it (the proxy is signed with a per-install [SigningIdentity]
+         * key generated on the device) and every call would be refused before any provider code
+         * ran. That was the design hole this asset closes.
+         *
+         * So the permission stays as a cheap first gate, and the real authorisation is here: the
+         * proxy checks the calling uid's signing certificate against the SHA-256 of the
+         * certificate belonging to the install that generated it. "The exact install that made me"
+         * is the relationship that actually matters, and only the generator knows it.
+         *
+         * Absent or malformed, the proxy falls back to permission-only enforcement — which is what
+         * the CI/debug configuration and `ProxyApkFactoryTest` rely on, and an explicit test
+         * rather than an accident. Malformed fails closed; absent fails open, deliberately.
          */
         const val GENERATOR_CERT_ASSET = "assets/understudy-generator-cert.sha256"
 

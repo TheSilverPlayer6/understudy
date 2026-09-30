@@ -7,8 +7,12 @@
 
     * signing/proxy-signer.pk8 and signing/proxy-signer.x509.pem — the identity that signs every
       generated proxy. Restoring it onto another device would let that device impersonate this
-      one's proxies, and restoring it *over* an existing identity would break every proxy already
-      installed here (they would no longer share a signer, so the bridge permission dies).
+      one's proxies. Restoring it *over* an existing identity is worse and less obvious: package
+      identity is device-wide, so a proxy already installed here was signed by the OLD key, and a
+      regenerated one signed by the restored key can no longer update it in place. Reinstalling
+      means a full uninstall first, which destroys the very Android/data/<pkg> this app exists to
+      protect. (The bridge permission is not what breaks — :app defines it, and the caller check
+      uses the app's own certificate, neither of which depends on this key.)
     * generated-proxies/*.apk — regenerable, and useless without the key anyway.
 
   `allowBackup="false"` already says this for Android 11 and below; from 12 on the platform reads

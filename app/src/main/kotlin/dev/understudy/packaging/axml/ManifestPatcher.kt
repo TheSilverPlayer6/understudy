@@ -34,9 +34,17 @@ package dev.understudy.packaging.axml
  * buggy expectation.
  *
  * So the rule is **exact match only**: replace a pool string iff it *equals* the template
- * package. That naturally spares the permission name `dev.understudy.permission.BRIDGE` (which
- * must stay identical in both APKs for the `signature`-level grant to line up) and the component
- * names, without either needing a special case.
+ * package. That naturally spares the component names, and it spares
+ * `dev.understudy.permission.BRIDGE` — which must NOT follow the rename, because `:app` defines
+ * that one name and every generated proxy requires it on its provider, so rewriting it per target
+ * would leave each proxy guarded by a permission nothing defines (and an undefined component
+ * permission fails closed, i.e. the bridge would be unreachable). It also spares
+ * `dev.understudy.action.PROXY_DISCOVERY`, which is what lets `:app`'s `<queries><intent>` find
+ * proxies whose package names are not known until generation time.
+ *
+ * `BridgePermissionOwnershipTest` pins all three on the committed binary template, not just on the
+ * sources, so a future "improvement" to the matching rule fails on the JVM rather than as an
+ * unreachable proxy on a device.
  */
 object ManifestPatcher {
 
