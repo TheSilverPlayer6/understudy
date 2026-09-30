@@ -197,8 +197,8 @@ in rough priority order:
    (`RUNNING_UNLOCKING`) before the framework crashes mid-unlock. Nothing further is
    reachable from this side; the job runs on `workflow_dispatch` only, harness intact, and
    the re-test conditions (fixed image / fixed gfxstream / an ATD image for 37) are recorded
-   in research/07 §3. If a dispatch re-test ever passes twice in a row, promote the entry
-   back into the push matrix — the gate is one `if:` line.
+   in research/07 §3. If a dispatch re-test ever passes twice in a row, promote it: copy the
+   matrix entry back into the `premise` job and delete `premise-api37`.
 7. **Debug and release builds cannot coexist on one device** (both define
    `dev.understudy.permission.BRIDGE`; `INSTALL_FAILED_DUPLICATE_PERMISSION`, same for
    upgrading over a build that left an *old* proxy installed). `InstallResultReceiver.describe`

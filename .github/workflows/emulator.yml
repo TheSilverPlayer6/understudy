@@ -150,21 +150,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: jvm
-    # True only for the entry whose image cannot pass yet; see the matrix comment. A job that
-    # is allowed to fail must be labelled as such in its name, or a green run means nothing.
-    continue-on-error: ${{ matrix.experimental }}
-    # The experimental entry (API 37) runs ONLY on workflow_dispatch. Its two blockers are
-    # upstream, measured, and documented in research/07 §3: the guest gfxstream assert Google
-    # declared intended behaviour (issuetracker 546200928 — both RegionSampling triggers are
-    # removed here, and no new aborts since run #50), and the image's secondary-user flow —
-    # the user reaches RUNNING_LOCKED and its CE storage never unlocks, which kills FUSE and
-    # every non-directBootAware component in that user. Run #53's sticky-unlock probe read
-    # the mechanism directly: a foreground switch STARTS the unlock (RUNNING_UNLOCKING at
-    # poll 4) and the framework then crashes mid-unlock. An indefinitely-red job on main
-    # trains everyone to ignore red — the project's own rule — so the harness stays
-    # dispatch-ready for the day Google ships a fixed android-37.x image:
-    # Actions → emulator → Run workflow.
-    if: ${{ !matrix.experimental || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +190,6 @@ jobs:
             disable-system-ui: 0
             installer-phase: 1
             death-phase: 1
-            experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             channel: stable
@@ -219,7 +203,6 @@ jobs:
             disable-system-ui: 0
             installer-phase: 1
             death-phase: 1
-            experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             channel: stable
@@ -233,13 +216,208 @@ jobs:
             disable-system-ui: 0
             installer-phase: 1
             death-phase: 1
-            experimental: false
             boot-timeout: 1200
             emulator-options: -no-snapshot-save -no-snapshot-load -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
             channel: stable
             ram-size: ""
             disk-size: ""
             cores: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install the SDK packages this project needs
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null | sort -V | tail -1)
+          test -n "$SDKMANAGER" || { echo "sdkmanager not found under $ANDROID_HOME"; exit 1; }
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          { echo "$ANDROID_HOME/platform-tools"; echo "$BT"; echo "$(dirname "$SDKMANAGER")"; } >> "$GITHUB_PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$BT:$(dirname "$SDKMANAGER"):$PATH"
+          if [ -w "$ANDROID_HOME" ]; then SUDO=""; else SUDO="sudo -E"; fi
+          yes | $SUDO "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          # Only platform-tools and build-tools are pinned. The *platform* is left to AGP's
+          # auto-provisioning: it knows the exact package id matching compileSdk, whereas
+          # hardcoding "platforms;android-37" fails because the real ids are
+          # "android-37.0" / "android-37.2".
+          $SUDO "$SDKMANAGER" --verbose "platform-tools" "build-tools;37.0.0" 2>&1 | tail -25
+          [ -n "$SUDO" ] && sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME" || true
+
+      # GitHub-hosted Linux runners expose /dev/kvm, but the udev rules leave it root-only.
+      # Without this the emulator falls back to software emulation and times out.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Build the APKs
+        run: ./gradlew --no-daemon --console=plain :app:assembleDebug :app:assembleDebugAndroidTest
+
+      # ProxyApkFactoryTest writes a signed proxy APK for com.example.targetgame as a side effect,
+      # so CI exercises exactly the code path the app uses at runtime rather than a separate
+      # generator. ProdSignedProxyTest additionally writes a proxy signed with a DIFFERENT (fresh
+      # random) key that carries the app's certificate digest — the production key layout, which
+      # is what the caller-auth phase of the premise script verifies.
+      - name: Generate the proxy APKs
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest \
+            --tests '*ProxyApkFactoryTest*' --tests '*ProdSignedProxyTest*' --rerun-tasks
+          APK=$(find app/build/outputs/proxy-test -name 'proxy-*.apk' | head -1)
+          test -n "$APK"
+          cp "$APK" /tmp/proxy.apk
+          ls -l /tmp/proxy.apk
+          aapt2 dump badging /tmp/proxy.apk | grep '^package:'
+          # The production caller-auth artifact lives in its own output dir so it cannot be
+          # confused with the same-key proxy above (which the jvm job verifies with head -1).
+          PRODSIGN=$(find app/build/outputs/proxy-prodsign -name 'proxy-prodsign-*.apk' | head -1)
+          test -n "$PRODSIGN" || { echo "::error::no prod-signed proxy was generated"; exit 1; }
+          cp "$PRODSIGN" /tmp/proxy-prodsign.apk
+          ls -l /tmp/proxy-prodsign.apk
+          aapt2 dump badging /tmp/proxy-prodsign.apk | grep '^package:'
+          # Guard the scenario's fidelity: the two proxies MUST have different signers, or the
+          # caller-auth test would silently exercise the permission path again and prove nothing.
+          echo "--- same-key proxy signer ---";   apksigner verify --print-certs /tmp/proxy.apk          | grep -iE 'SHA-256 digest' || true
+          echo "--- prod-signed proxy signer ---"; apksigner verify --print-certs /tmp/proxy-prodsign.apk | grep -iE 'SHA-256 digest' || true
+          A=$(apksigner verify --print-certs /tmp/proxy.apk | grep -iE 'SHA-256 digest' | head -1)
+          B=$(apksigner verify --print-certs /tmp/proxy-prodsign.apk | grep -iE 'SHA-256 digest' | head -1)
+          if [ "$A" = "$B" ]; then
+            echo "::error::prod-signed proxy has the SAME signer as the same-key proxy; the production scenario is not being tested"
+            exit 1
+          fi
+          echo "signers differ: production caller-auth scenario is faithful"
+
+      # Creating a user and installing packages both need uid 2000, so the orchestration lives in
+      # a shell script rather than in the test — an app cannot do either, even instrumented.
+      - name: Run the premise test in a secondary profile
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          # `default` (AOSP) wherever one exists. Planting fixture bytes into a *secondary* user's
+          # private storage requires uid 0: uid 2000 is exempt from the FUSE filter only inside its
+          # own mount namespace and so cannot reach /storage/emulated/10 at all. Root is also more
+          # faithful — the raw /data/media/<user> path we write to is exactly where the
+          # rename-aside trick operates. There is no `default` image above API 35, so those levels
+          # use google_apis, which turns out to be rootable anyway; see the matrix comment.
+          target: ${{ matrix.target }}
+          # Per-matrix so only the failing job moves. `--channel=N` is inclusive, so canary still
+          # resolves the stable `system-images;android-37.0;google_apis;x86_64`; what it changes is
+          # the emulator build the action installs.
+          channel: ${{ matrix.channel }}
+          arch: x86_64
+          # `ram-size`, NOT `ram` — and getting that wrong is worth recording, because it cost two
+          # runs and produced a confidently wrong conclusion. `ram` is not one of this action's 26
+          # inputs; GitHub passes an unknown `with:` key through as an environment variable and the
+          # action ignores it, so `ram: 4096M` did nothing at all. The config dump said
+          # "RAM size: " (empty) in both runs and I read past it. Commit 7e010f5 therefore claimed
+          # the memory hypothesis was "worth one test and is now disproved" when the test had never
+          # been executed — the exact failure mode this project's methodology section warns about,
+          # committed to git by the person writing the methodology.
+          #
+          # Per-matrix rather than global: the three jobs that boot get "", i.e. today's behaviour
+          # unchanged (the emulator auto-bumps them to 2560MB and logs "Increasing RAM size"), so
+          # this changes exactly one variable on the one job that is failing.
+          ram-size: ${{ matrix.ram-size }}
+          # Per-matrix for the same one-variable-at-a-time reason as ram-size and disk-size.
+          # The API 37 job gets the runner's full 4 vCPUs: its guest reached system_server and
+          # then surfaceflinger crashed during boot (run #41), which on a software-rendered
+          # emulator with 2 cores is a resource problem before it is anything else.
+          cores: ${{ matrix.cores }}
+          # Same lesson as ram-size, learned one run later: verified against the action's source
+          # (src/emulator-manager.ts pushes `disk.dataPartition.size=<value>` into config.ini)
+          # rather than assumed from the input's name. Run #40 got the guest to 4 GB and it booted
+          # all the way to system_server, then `pm create-user` failed with
+          # "Cannot add user. Not enough space on disk. (code 5)" — UserManagerService checks
+          # allocatable bytes on /data before allowing a secondary profile, and the API 37 image's
+          # default data partition is too small for one.
+          disk-size: ${{ matrix.disk-size }}
+          # 600 was enough for every image that booted, but the budget is what turned a slow boot
+          # into a hard failure with no diagnostic. Headroom costs nothing on a job that is
+          # already the longest in the workflow.
+          emulator-boot-timeout: ${{ matrix.boot-timeout }}
+          # No snapshot: a restored one could carry a user profile or an install over from a
+          # previous attempt and make a failing step look like it succeeded.
+          disable-animations: true
+          # Fully per-matrix, because the GPU backend is now the variable under test on API 37 and
+          # must not move for the three jobs that pass.
+          emulator-options: ${{ matrix.emulator-options }}
+          script: .github/scripts/run-premise-test.sh ${{ matrix.api-level }}
+        env:
+          # 0 for the AOSP jobs, so losing root fails the run loudly instead of silently degrading
+          # to a reduced suite that still reports success. 1 for the google_apis jobs, where root
+          # is available today but is a property of the image Google published rather than
+          # something we control; see the matrix comment.
+          ALLOW_NO_ROOT: ${{ matrix.allow-no-root }}
+          # API 37 only: removes the trigger for the guest gfxstream abort (SystemUI's navbar
+          # RegionSampling) rather than trying to remove the capability, which cannot be done —
+          # see the matrix comment and the block in run-premise-test.sh.
+          DISABLE_SYSTEM_UI: ${{ matrix.disable-system-ui }}
+          # The in-app PackageInstaller phase (HANDOFF §3.4) and the process-death recovery
+          # phase (HANDOFF §3.6). Off on API 37 until that job can survive the phases it has.
+          RUN_INSTALLER_PHASE: ${{ matrix.installer-phase }}
+          RUN_DEATH_PHASE: ${{ matrix.death-phase }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: premise-results-api${{ matrix.api-level }}
+          path: |
+            app/build/outputs/androidTest-results/
+            app/build/reports/androidTests/
+            premise-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # --------------------------------------------------------------------------------------------
+  # API 37 — DISPATCH-ONLY retest harness.
+  #
+  # This was a matrix entry with continue-on-error until run #53, and red-for-seventeen-runs
+  # is exactly what the project's own rule forbids: "a job allowed to fail has to be labelled
+  # as one, or a green run stops meaning anything" — and an indefinitely-red job trains
+  # everyone to ignore red. Both of its blockers are upstream, measured, and documented in
+  # research/07 §3:
+  #
+  #   1. graphics — the guest mapper.ranchu assert against ReadColorBufferDma, which Google's
+  #      tracker calls intended behaviour (issuetracker 546200928, Won't fix; 557246813
+  #      duplicate). The capability cannot be disabled from the host (canary 37.3.2.0:
+  #      "[FeatureControl] Bad feature name"; GLDMA flags measured ineffective elsewhere), so
+  #      the job removes both TRIGGERS — SystemUI and the resolved HOME app are the only
+  #      RegionSampling registrants on a headless guest — and no new aborts have occurred
+  #      since run #50.
+  #   2. storage — the secondary user reaches RUNNING_LOCKED and its CE storage never unlocks
+  #      (flags 0x400 vs the healthy 0x410), so its FUSE daemon is dead ("Transport endpoint
+  #      is not connected") and every non-directBootAware component, the proxy's provider
+  #      included, is unavailable even to root. Run #53's sticky-unlock probe read the
+  #      mechanism directly: a foreground switch STARTS the unlock (RUNNING_UNLOCKING at poll
+  #      4) and the framework then crashes mid-unlock. There is no third move from this side.
+  #
+  # So: a job-level `if` on github.event_name — the one gate context a job-level if actually
+  # accepts; `matrix` there is an "Unrecognized named-value" that failed the whole run at
+  # startup with zero jobs (run #54's annotation, and the lesson: even a workflow edit needs
+  # its own green run). Re-test by hand (Actions → emulator → Run workflow) when Google ships
+  # a fixed android-37.x image, a fixed gfxstream backend, or an ATD image for 37 — the
+  # recovery conditions docker-android listed. No continue-on-error here on purpose: a manual
+  # retest must be unambiguous. Promote back into the push matrix after two green dispatch
+  # runs — copy the matrix entry back, delete this job.
+  premise-api37:
+    name: FUSE premise (API 37, google_apis — dispatch-only retest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: jvm
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
           # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
           # package that does not exist. The real id keeps the minor.
@@ -250,23 +428,21 @@ jobs:
           # 4096M of RAM and a 1200 s timeout changed nothing, and API 36 on the same action,
           # emulator build and runner boots in about a minute.
           #
-          # So this entry is EXPERIMENTAL and says so: `continue-on-error` keeps main green while
-          # the question is open, `-show-kernel` puts the guest kernel console in the job log,
-          # which is the only evidence that can distinguish "slow", "panicking" and "this image
-          # needs an emulator the stable channel has not shipped yet", and a short boot timeout
-          # keeps the cycle cheap. Guessing at fixes without that output is how this project spent
-          # six runs on a directory path. If the kernel log does not explain it, the job gets
-          # deleted and the blocker documented — a measured negative result is worth keeping, an
-          # indefinitely-red or indefinitely-ignored job is not.
+          # The entry keeps its original instrumentation rationale: `-show-kernel` puts the
+          # guest kernel console in the job log — the evidence that once distinguished "slow"
+          # from "panicking" from "needs an emulator the stable channel has not shipped" — and
+          # the short boot timeout keeps a retest cycle cheap. The question it was experimental
+          # FOR is now answered (see the job header and research/07 §3), so the entry no longer
+          # runs on push and no longer carries continue-on-error: a retest is manual, and its
+          # verdict is meant to be unambiguous.
           - api-level: "37.0"
             target: google_apis
-            label: API 37, google_apis — EXPERIMENTAL
+            label: API 37, google_apis — dispatch-only retest
             allow-no-root: 1
             disable-system-ui: 1
             # No new phases on the job that is still fighting for a stable boot.
             installer-phase: 0
             death-phase: 0
-            experimental: true
             boot-timeout: 900
             # Back to swiftshader_indirect. Run #44 tried angle_indirect and the emulator rejected
             # it outright —
