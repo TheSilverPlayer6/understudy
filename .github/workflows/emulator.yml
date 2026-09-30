@@ -193,6 +193,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             extra-emulator-options: ""
+            ram-size: ""
           - api-level: 35
             target: default
             label: API 35, AOSP
@@ -200,6 +201,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             extra-emulator-options: ""
+            ram-size: ""
           - api-level: 36
             target: google_apis
             label: API 36, google_apis
@@ -207,6 +209,7 @@ jobs:
             experimental: false
             boot-timeout: 1200
             extra-emulator-options: ""
+            ram-size: ""
           # Quoted on purpose. Unquoted, YAML parses 37.0 as a float and the Actions expression
           # renders it as "37", which builds `system-images;android-37;google_apis;x86_64` — a
           # package that does not exist. The real id keeps the minor.
@@ -230,8 +233,9 @@ jobs:
             label: API 37, google_apis — EXPERIMENTAL
             allow-no-root: 1
             experimental: true
-            boot-timeout: 420
+            boot-timeout: 900
             extra-emulator-options: -show-kernel
+            ram-size: 4096M
     steps:
       - uses: actions/checkout@v4
 
@@ -320,14 +324,19 @@ jobs:
           # use google_apis, which turns out to be rootable anyway; see the matrix comment.
           target: ${{ matrix.target }}
           arch: x86_64
-          # Set explicitly rather than left to the emulator's auto-bump, because the API 37 image
-          # did not get one. Run #37: API 36 logged "Increasing RAM size to 2560MB" and booted;
-          # API 37 logged nothing, ran on the AVD default (its boot properties show
-          # dalvik.vm.heapsize=64m), stayed `adb: device offline` for the whole 600 s budget and
-          # timed out. Same action, same options, same runner — the only difference was memory.
-          # 4096M is comfortably inside the runner's 16 GB and strictly more than the 2560MB the
-          # working jobs were already using, so it cannot be a regression for them.
-          ram: 4096M
+          # `ram-size`, NOT `ram` — and getting that wrong is worth recording, because it cost two
+          # runs and produced a confidently wrong conclusion. `ram` is not one of this action's 26
+          # inputs; GitHub passes an unknown `with:` key through as an environment variable and the
+          # action ignores it, so `ram: 4096M` did nothing at all. The config dump said
+          # "RAM size: " (empty) in both runs and I read past it. Commit 7e010f5 therefore claimed
+          # the memory hypothesis was "worth one test and is now disproved" when the test had never
+          # been executed — the exact failure mode this project's methodology section warns about,
+          # committed to git by the person writing the methodology.
+          #
+          # Per-matrix rather than global: the three jobs that boot get "", i.e. today's behaviour
+          # unchanged (the emulator auto-bumps them to 2560MB and logs "Increasing RAM size"), so
+          # this changes exactly one variable on the one job that is failing.
+          ram-size: ${{ matrix.ram-size }}
           # 600 was enough for every image that booted, but the budget is what turned a slow boot
           # into a hard failure with no diagnostic. Headroom costs nothing on a job that is
           # already the longest in the workflow.

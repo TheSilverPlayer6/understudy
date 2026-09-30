@@ -153,16 +153,50 @@ caller-authentication path. In rough priority order, what is actually left:
 5. **SAF writes** to a user-picked tree, grant persistence across reboot, and the
    `hasFragileUserData` "Keep app data" checkbox on a current build.
 6. **Recovery from process death** mid-transfer.
-7. **API 37 itself, and the rooted jobs stop at 35.** There is no AOSP `target: default` system
-   image above API 35 — `sdkmanager --list` offers `google_apis`, `google_apis_playstore` and
-   `google_atd` for 36/37 and nothing else — and `google_apis` is production-signed, so
-   `adb root` is refused. Root is not a convenience: planting fixture bytes into a *secondary*
-   user's private storage needs uid 0. So API 36 runs a **reduced** job (`ALLOW_NO_ROOT=1`) that
-   proves everything except the two claims needing root-planted bytes, and prints
-   `PREMISE VERIFIED (REDUCED, no root)` rather than pretending otherwise. API 37 has no image the
-   emulator-runner action can address at all (it builds `system-images;android-37;…`; the real ids
-   are `android-37.0` / `android-37.1`). The rooted jobs run with `ALLOW_NO_ROOT=0` so that losing
-   root fails loudly — run #30 is what a silent degradation looks like.
+7. **API 37 boots a guest with ~95 MB of RAM.** API 34, 35 and 36 run the *full* suite. Getting 36
+   was itself a correction: this item used to say the rooted jobs had to stop at 35 because
+   `google_apis` refuses `adb root`. That was **wrong** — `adb root` succeeds on
+   `system-images;android-36;google_apis;x86_64` (run #36: rooted on attempt 1, fixtures planted
+   under `/data/media/10`, `-k` preservation asserted, `OK (11 tests)`, nothing skipped). The
+   milestone-4 finding was measured on API 34/35 `google_apis` images and is true *there*; it is not
+   a property of the target.
+
+   API 37 is addressable: `api-level: "37.0"` **quoted** (unquoted, YAML makes it a float and
+   Actions renders `37`, building a package name that does not exist), and the image installs and
+   the AVD builds. The emulator then never comes up. `-show-kernel` says why, in one line:
+
+   ```
+   [    0.605550] Memory: 39808K/97744K available (22528K kernel code, …)
+   ```
+
+   **95 MB of guest RAM.** Android cannot boot in that. Boot otherwise proceeds normally — init
+   first stage, eight modules, `/metadata` mounted, logical partitions created, "DSU not detected,
+   proceeding with normal boot" at t=1.73 s — and then the serial console goes quiet, which is what
+   second-stage init does; there is no panic and no crash. `adb` reports `device offline` for the
+   whole budget because there is nothing on the other end yet.
+
+   The RAM was never set, and that is the second lesson here. Runs #37 and #38 passed
+   `ram: 4096M`; the action's input is **`ram-size`**, `ram` is not one of its 26 inputs, and
+   GitHub hands an unknown `with:` key to the action as an environment variable and nothing more.
+   The config dump printed `RAM size: ` (empty) in both runs and I read past it, then committed
+   "the RAM hypothesis was worth one test and is now disproved". It had not been tested. When an
+   instrument reads empty, the instrument is the finding — which is what this repo's own
+   verification-methodology section says, written by the same process that just ignored it.
+
+   Why the other jobs are fine: for API 34/35/36 the emulator notices the AVD default is too small
+   and logs `INFO | Increasing RAM size to 2560MB`. For the API 37 image it does not, so the AVD
+   default stands. `ram-size` is now set per-matrix — `4096M` for API 37, empty for the three that
+   already boot, so exactly one variable changes on the one job that is failing.
+
+   The job stays `experimental` (`continue-on-error`, EXPERIMENTAL in its name) until it boots. A
+   job allowed to fail has to be labelled as one, or a green run stops meaning anything.
+
+   `ALLOW_NO_ROOT=1` stays on the `google_apis` jobs as a fallback, since whether an image Google
+   publishes is rootable is not ours to control; if one ever is not, the job degrades to the
+   root-free subset and says so three ways — a `::warning::` annotation on the run's front page, a
+   banner listing exactly which claims are and are not proven, and a final line reading
+   `PREMISE VERIFIED (REDUCED, no root)`. The AOSP jobs stay at 0 so losing root fails loudly; run
+   #30 is what a silent degradation looked like.
 8. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
 9. **Debug and release builds cannot coexist on one device.** Both define
    `dev.understudy.permission.BRIDGE`, so the second install fails with

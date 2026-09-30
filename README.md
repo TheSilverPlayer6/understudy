@@ -266,8 +266,21 @@ secondary profile, in CI on every push: `PREMISE VERIFIED on API 34` / `on API 3
 
 ### Which platforms CI covers, and one belief it corrected
 
-Four jobs: **API 34 and 35 on AOSP `target: default`**, and **API 36 and 37 on `google_apis`**.
-All four run the *full* suite.
+Three blocking jobs run the *full* suite: **API 34 and 35 on AOSP `target: default`**, and
+**API 36 on `google_apis`**. A fourth, **API 37**, is marked EXPERIMENTAL and allowed to fail; the
+project targets API 37, so that is an open gap rather than a closed one.
+
+The cause is known and is not a platform problem. `-show-kernel` puts the guest console in the job
+log, and the guest reports `Memory: 39808K/97744K available` — **95 MB of RAM**. Boot otherwise
+proceeds normally (init first stage, `/metadata` mounted, logical partitions created, "DSU not
+detected, proceeding with normal boot" at t=1.73 s) and then the serial console goes quiet, which
+is what second-stage init does; there is no panic. `adb` reports `device offline` for the whole
+budget because nothing is on the other end yet. For API 34/35/36 the emulator notices the AVD
+default is too small and logs `Increasing RAM size to 2560MB`; for the API 37 image it does not.
+
+Two runs were lost to a typo before that was found: the emulator-runner action's input is
+`ram-size`, and `ram: 4096M` is silently ignored as an unknown `with:` key, so the memory was never
+set — while the action's own config dump printed `RAM size: ` (empty) both times.
 
 There is no AOSP `default` system image above API 35 — `sdkmanager --list` offers `google_apis`,
 `google_apis_playstore` and `google_atd` for 36 and 37 and nothing else. Milestone 4 concluded from
