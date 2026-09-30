@@ -79,7 +79,11 @@ class TransferDeathPremiseTest {
 
     private val smallFiles = listOf("s0.bin" to 101, "s1.bin" to 202, "s2.bin" to 303)
     private val smallSize = 256 * 1024L
-    private val bigFile = "big.bin"
+    // Named to sort LAST in the provider's deterministic listing order (directories
+    // first, then case-insensitive name): the three small files complete before the big one
+    // starts, so the kill lands with filesDone=3 and the resume's mtime skip-proof is real
+    // rather than vacuous (run #56 killed at filesDone=0 because "big.bin" sorted first).
+    private val bigFile = "z-big.bin"
     private val bigSeed = 999
     private val bigSize = 64L * 1024 * 1024
     private val killAfterBytes = 8L * 1024 * 1024
@@ -206,10 +210,16 @@ class TransferDeathPremiseTest {
         assertEquals(target, entry.targetPackage)
 
         // 2. What the dead process had already finished. Sizes are the engine's resume oracle;
-        //    mtimes are the proof that skipping really happened.
+        //    mtimes are the proof that skipping really happened. NOTE the srcDir prefix: the
+        //    plan's relativePaths (and therefore the destination layout) are relative to the
+        //    storage ROOT — pulling "death-test-src" lands its files under
+        //    <dest>/death-test-src/. Run #56's resume copied the whole tree perfectly and the
+        //    unprefixed assertions still called it a failure; the pulled subtree is part of
+        //    every path below.
         val dest = FileDestination(destRoot())
-        val completedBefore = (smallFiles.map { it.first } + bigFile)
-            .map { it to File(destRoot(), it) }
+        val expectedNames = smallFiles.map { it.first } + bigFile
+        val completedBefore = expectedNames
+            .map { name -> name to File(destRoot(), "$srcDir/$name") }
             .filter { it.second.isFile && it.second.length() > 0 }
         val mtimesBefore = completedBefore.associate { (name, f) -> name to f.lastModified() }
         println("DEATH-DIAG resume: files already on disk: " +
@@ -269,8 +279,8 @@ class TransferDeathPremiseTest {
         val expected = smallFiles.map { (name, seed) -> Triple(name, smallSize, seed) } +
             Triple(bigFile, bigSize, bigSeed)
         for ((name, size, seed) in expected) {
-            val f = File(destRoot(), name)
-            assertTrue(f.isFile, "$name missing after resume")
+            val f = File(destRoot(), "$srcDir/$name")
+            assertTrue(f.isFile, "$srcDir/$name missing after resume")
             assertEquals(size, f.length(), "$name has the wrong size after resume")
             val actual = f.inputStream().use { input ->
                 val md = MessageDigest.getInstance("SHA-256")
@@ -293,13 +303,19 @@ class TransferDeathPremiseTest {
         //    rewritten — same size, same mtime. (The big file may legitimately have a new
         //    mtime: dying mid-copy means it was re-pulled, which is the documented behaviour.)
         for ((name, mtime) in mtimesBefore) {
-            val f = File(destRoot(), name)
+            val f = File(destRoot(), "$srcDir/$name")
             if (name != bigFile || f.lastModified() == mtime) {
                 // small files: always skipped when they completed pre-death. big: skipped only
                 // in the fallback case where it completed pre-death — and then its mtime is
                 // unchanged too, which is exactly what this asserts.
                 assertEquals(mtime, f.lastModified(), "$name was re-copied despite being complete")
             }
+        }
+        // With the big file named to walk last, the normal kill lands at filesDone=3 — say so
+        // loudly if a future ordering change empties the skip proof again.
+        if (mtimesBefore.isEmpty()) {
+            println("DEATH-DIAG resume: WARNING — nothing had completed before the kill, so the " +
+                "mtime skip-proof is vacuous in this run")
         }
 
         // 7. Terminal: the offer must not reappear.
