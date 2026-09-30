@@ -555,25 +555,61 @@ log "storage + component state of user $USER_ID (diagnostic, all levels)"
 # ends by force-stopping the proxy, so the suite still faces the exact cold state it would
 # have faced without this block.
 echo "-- user state --"
+USER_STATE_LINE="$(adb shell "dumpsys user 2>/dev/null" | grep -A2 "UserInfo{$USER_ID:" | grep -oE "State: [A-Z_]+" | head -1 || true)"
 adb shell "dumpsys user 2>/dev/null | grep -E 'UserInfo\{$USER_ID|State|running|initialized|unlocked' | head -12" 2>&1 || true
+echo "user $USER_ID state: ${USER_STATE_LINE:-<unreadable>}"
+# API 37's premise failure (runs #45-#51) reduces to this line: the secondary user reaches
+# RUNNING_LOCKED and its CE storage NEVER unlocks — flags stay 0x400 without the 0x010
+# INITIALIZED bit, the FUSE daemon for the user dies ("Transport endpoint is not connected"),
+# every non-directBootAware component becomes unavailable ("Activity class ... does not exist"
+# for an installed package; content query from ROOT: "Could not find provider"), and the suite
+# reports ProxyUnreachable while getPackageInfo succeeds. API 34/35 show the healthy control in
+# the same block: RUNNING_UNLOCKED, flags 0x410, cold provider resolvable while stopped — which
+# also kills the stopped-state-filtering theory: on healthy levels nothing needs to unstop the
+# proxy for its provider to resolve.
+#
+# The probe below tests whether a foreground switch completes the stuck unlock: startUser
+# normally unlocks credential-less secondary users automatically, and becoming current re-drives
+# UserController's unlock path. CE unlock is STICKY, so if it works we switch straight back and
+# the suite still runs against a background user — the harder case every other level passes.
+if printf '%s' "$USER_STATE_LINE" | grep -q "LOCKED"; then
+  echo "!! user $USER_ID is RUNNING_LOCKED: CE storage never unlocked. Probing the"
+  echo "   foreground-switch workaround (one variable, logged before and after)."
+  adb shell am switch-user "$USER_ID" 2>&1 | head -3 || true
+  for i in $(seq 1 20); do
+    st="$(adb shell "dumpsys user 2>/dev/null" | grep -A2 "UserInfo{$USER_ID:" | grep -oE "State: [A-Z_]+" | head -1 || true)"
+    echo "unlock poll $i: ${st:-<unreadable>}"
+    printf '%s' "$st" | grep -q "RUNNING_UNLOCKED" && break
+    sleep 3
+  done
+  echo "-- switching back to user 0; CE unlock is sticky if it happened --"
+  adb shell am switch-user 0 2>&1 | head -3 || true
+  sleep 3
+  adb shell "dumpsys user 2>/dev/null | grep -A2 'UserInfo{$USER_ID:'" 2>&1 | head -6 || true
+  echo "-- does the proxy's storage work now? --"
+  adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
+fi
 echo "-- volumes + mounts --"
 adb shell sm list-volumes 2>&1 | head -8 || true
 adb shell "mount 2>/dev/null | grep -E '/storage/emulated|/mnt/pass_through/$USER_ID|/mnt/runtime/[a-z]*/emulated/$USER_ID' | head -10" 2>&1 || true
 echo "-- MediaProvider (the FUSE host process) --"
-adb shell "pidof com.google.android.providers.media.module" 2>&1 || echo "  (media module process not running)"
+adb shell "pidof com.google.android.providers.media.module || pidof com.android.providers.media.module" 2>&1 || echo "  (media module process not running under either known name)"
 adb shell "logcat -d -v time MediaProvider:V FuseDaemon:V vold:W StorageManagerService:W *:S 2>/dev/null | tail -30" 2>&1 || true
-echo "-- can the platform resolve the proxy's provider? (BEFORE any launch: cold, stopped state) --"
-adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -6" || true
+echo "-- can the platform reach the proxy's provider? (BEFORE any launch: cold, stopped state) --"
+# `content query` from the shell is the functional probe; uid 0/2000 bypasses visibility
+# filtering, so a failure here is platform state, not AppsFilter. (`cmd package
+# resolve-content-provider` does not exist — measured "Unknown command" on 34, 35 and 37.)
 adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
-echo "-- stopped-state discriminator: launch the proxy's own exported activity, then re-resolve --"
+echo "-- component availability probe: launch the proxy's own exported activity --"
+# On a LOCKED user this answers "Error type 3: Activity class ... does not exist" for a package
+# that is demonstrably installed (run #51, API 37) — components of a CE-locked user are simply
+# not there yet. On healthy levels it starts, which also clears the stopped flag; the query
+# before/after distinguishes the two stories, and the force-stop returns the package to the
+# exact cold state the suite will face.
 adb shell "am start --user $USER_ID -n $TARGET_PKG/dev.understudy.proxytpl.ProxyStatusActivity" 2>&1 | head -5 || true
 sleep 3
-adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -6" || true
 adb shell content query --user "$USER_ID" --uri "content://$TARGET_PKG/data" 2>&1 | head -4 || true
-echo "-- and after force-stop (re-arms the stopped flag): does resolution die again? --"
 adb shell "am force-stop --user $USER_ID $TARGET_PKG" 2>&1 || true
-sleep 1
-adb shell "cmd package resolve-content-provider --user $USER_ID $TARGET_PKG 2>&1 | head -4" || true
 echo "-- (end of storage diagnostics) --"
 
 log "plant known bytes in the proxy's private storage"
@@ -1001,6 +1037,22 @@ if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
   adb_fw appops set --user "$USER_ID" "$APP_PKG" REQUEST_INSTALL_PACKAGES allow || true
   adb_fw appops get --user "$USER_ID" "$APP_PKG" REQUEST_INSTALL_PACKAGES || true
 
+  # The confirmation dialog is UI, and UI only draws for the CURRENT user: run #51's logcat is
+  # the evidence — "W/ActivityTaskManager: Can't resume non-current user …
+  # com.android.packageinstaller/.InstallStart", launched with BAL_ALLOW_PERMISSION, task
+  # created, isVisible=false forever, and UiAutomator correctly found no Install button on a
+  # dialog that was never allowed on screen. So: switch the profile to the foreground for this
+  # phase only, and switch back afterwards — the FUSE/caller-auth phases above and the teardown
+  # below keep running against a background user, the harder case they have always tested.
+  log "switch user $USER_ID to the foreground (the confirmation dialog needs a current user)"
+  adb shell am switch-user "$USER_ID" 2>&1 | head -3 || true
+  for i in $(seq 1 20); do
+    cur="$(adb shell am get-current-user 2>/dev/null | tr -d '\r' || true)"
+    [ "$cur" = "$USER_ID" ] && break
+    sleep 2
+  done
+  echo "current user: $(adb shell am get-current-user 2>&1 | tr -d '\r' || true)"
+
   log "run the installer-session premise test as user $USER_ID"
   adb logcat -c 2>/dev/null || true
   adb logcat -v time > premise-logs/installer-logcat.log 2>&1 &
@@ -1033,6 +1085,10 @@ if [ "${RUN_INSTALLER_PHASE:-1}" = "1" ]; then
   echo "INSTALLER-SESSION VERIFIED on API $API: the app staged, committed and received the"
   echo "  result of its own proxy install ($INSTALLER_PKG) for user $USER_ID, and the bridge"
   echo "  answered through the session-installed proxy."
+
+  log "switch back to user 0 (leave teardown the background-user state it expects)"
+  adb shell am switch-user 0 2>&1 | head -3 || true
+  sleep 2
 else
   echo "-- installer-session phase SKIPPED (RUN_INSTALLER_PHASE=${RUN_INSTALLER_PHASE:-1}) --"
 fi
