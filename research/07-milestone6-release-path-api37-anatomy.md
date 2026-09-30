@@ -208,6 +208,23 @@ locally against interleaved and CRLF output), and the gate is exact-match dispat
 `RUNNING_UNLOCKED` *contains* the substring `LOCKED`, so the grep it replaced would have
 "fixed" healthy levels the moment extraction started working.
 
+Run #53 ran the probe, and the probe delivered: polls 1–3 `RUNNING_LOCKED`, poll 4 —
+after the foreground switch — **`RUNNING_UNLOCKING`**. The mechanism is real; the unlock
+*starts*. And then the framework crashes mid-unlock (native `crash_dump64` at t≈109 s,
+system_server restarting, polls degrading to unreadable), the user never reaches
+`RUNNING_UNLOCKED`, and the provider stays unresolvable. There is no third move from this
+side of the glass: the image's own user-unlock flow dies while doing exactly what the
+workaround asks of it.
+
+**So API 37 is dispatch-only now.** Two upstream defects, both measured, both documented
+(gfxstream: won't-fix 546200928, triggers removed here — no new aborts since #50;
+user-unlock: the probe above). The project's own rule decided it: an indefinitely-red job
+trains everyone to ignore red, and a measured negative result is worth keeping *as a
+document*, not as a tick that never turns. The harness stays whole behind
+`workflow_dispatch` — re-test the day Google ships a fixed `android-37.x` image; the
+recovery conditions are the ones docker-android listed: a fixed image, a fixed gfxstream
+backend, or an ATD image for 37.
+
 ---
 
 ## 4. The in-app install path, on a device (§3.4 — closed, and corrected by the device)
@@ -259,6 +276,15 @@ that, the AOSP one does not. The phase now marks the profile provisioned
 foreground — the standard emulator-CI remedy — and the test gained a tap-by-id fallback,
 because the AOSP and Google installers share the `ok_button` id but not the package name.
 
+Run #53 proved the remedy works and found the *fourth* layer in the same dump that proved
+it: the dialog rendered in full on AOSP 35 — "Do you want to install this app?", title
+"Understudy Proxy", buttons `text="INSTALL"` and `text="CANCEL"` — and the test still
+reported no button, because `By.text("Install")` is case-sensitive and AOSP's alert dialog
+shouts. The word is the invariant; the capitalisation is per-build. The selector is now a
+case-insensitive `^install$` pattern with the id fallbacks behind it. Four layers deep,
+every one found by a device in a single run each, every one invisible to 197 JVM tests —
+which is not a criticism of the JVM tests; it is the job description of this suite.
+
 Deliberately not covered: the uninstall half. `PackageInstaller.uninstall` always routes
 through a dialog, and the proxy's `hasFragileUserData` guarantees one (the "Keep app data"
 checkbox); there is no faithful headless tap for a data-retention choice. The data-keeping
@@ -290,6 +316,22 @@ session **for the same package and user the journal names** (or bytes flow to th
 proxy), and a SAF grant that still restores. Refusals name the remedy. A resumed pull is
 cheap by construction; a resumed push re-copies the tree, because a size-skip in that
 direction could leave a truncated file *inside the save directory* looking restored.
+
+The **device half followed in the same session**: `TransferDeathPremiseTest`, two instrument
+invocations, because a dead process cannot keep testing. Phase `die` builds a known tree in
+the proxy's storage through the real bridge (three small files plus 64 MB), begins a
+journaled pull into app-specific external storage, and — the moment the big file passes
+8 MB of in-flight copy, checked inside the per-chunk progress callback so no external
+polling race exists — `Process.killProcess(myPid())`: SIGKILL to self, no handlers, no
+cancellation, no terminal journal write; exactly what the low-memory killer does to a
+transfer in flight. Phase `resume` is a fresh process: the journal must say RUNNING for
+that exact transfer; the re-run pull must land every file byte-exact (SHA-256 against the
+deterministic generator); files completed before the kill must be *untouched* (mtime — the
+on-device analogue of the JVM suite's write-counting); no `.part` may survive; the journal
+must end terminal. The die phase's verdict is the journal XML read from disk as root, not
+the instrument exit — a crash is its success signature, which is why this one phase cannot
+use the whitelist helper. Running on 34/35/36 and the release job, where it additionally
+proves an R8'd app writes a journal a fresh R8'd process can read.
 
 ---
 
@@ -331,9 +373,19 @@ URI. Nobody knew which candidate command exists on which level, and guessing is 
 project once spent six runs on a directory path. Every level now runs a strictly
 informational probe: `content grant-uri-permission`, `pm grant-uri-permission`, an `am
 broadcast` carrying `--grant-*-uri-permission`, then `dumpsys activity uri-permissions` to
-show what actually landed. When a run shows a working candidate, the `SafDestination`
-instrumented test becomes writable; when all three fail on all levels, §3.5 gets an honest
-"needs a human or a UI rig" and stops looking like unfinished work.
+show what actually landed.
+
+**Run #53 answered it, and the answer is no** (API 35 AOSP; the other levels' logs agree):
+`content` has no grant subcommand (it prints usage), `pm grant-uri-permission` is
+`Unknown command`, and the broadcast "completes" with zero receivers — which confers
+nothing; the subsequent `dumpsys activity uri-permissions` shows the app holding no tree
+grant. So §3.5's honest label is now evidence-backed: **instrumented SAF coverage needs a
+human, or a UI rig that drives the real picker** — technically possible with the UiAutomator
+muscle this milestone built for the install dialog (launch the picker, tap through folder
+selection and "Allow"), but every extra step is per-level wording and layout risk, and the
+picker's grant flow is exactly what OEMs customise hardest. The probe stays in the script:
+it costs four best-effort commands, and if any future level grows a shell grant path, the
+log will say so on the first run that has it.
 
 ---
 

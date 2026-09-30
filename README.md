@@ -250,13 +250,17 @@ keytool -printcert                         →  parses our hand-built PKCS#7
   `hasFragileUserData` guarantees the "Keep app data" checkbox appears in it — but no headless tap
   is *faithful* for a data-retention choice, so CI asserts the data-keeping uninstall via
   `pm uninstall -k` and leaves the dialog itself to humans.
-* **SAF writes** to a user-picked tree, and grant persistence across reboot. Whether CI can cover
-  them at all now has a probe running on every job: root bypasses the URI-grant check, so if any
-  shell-side grant mechanism exists (`content`/`pm grant-uri-permission`, broadcast grants), an
-  instrumented `SafDestination` test becomes writable; the probe's output decides, per API level.
-* **Process-death recovery on a device.** The journal that makes a killed mid-transfer resumable
-  is built and its semantics are JVM-pinned (11 tests), and resume refuses without a live session
-  for the same package/user — but no CI run has yet died mid-transfer for real and come back.
+* **SAF writes** to a user-picked tree, and grant persistence across reboot. The question "can
+  CI fake the picker's grant?" now has a measured answer: **no** — every job runs a probe, and
+  on every level `content` has no grant subcommand, `pm grant-uri-permission` is unknown, and a
+  broadcast grant to a receiver-less package confers nothing. Covering SAF on a device needs a
+  human or a UI rig driving the real picker; the probe stays as a tripwire for future builds.
+* **The resume *UI*, and a resume through a re-established session.** Process death itself is
+  covered on every job: `TransferDeathPremiseTest` SIGKILLs a journaled pull mid-flight and a
+  fresh instrument process must find the journal `RUNNING`, re-run the pull to byte-exact
+  completion, and prove the already-finished files were not re-copied (untouched mtimes). What
+  no CI run exercises is the human-facing half — the Files-tab recovery card — or resuming after
+  the *session* died with the process and had to be re-verified first.
 
 A second instrumented class, `CallerAuthPremiseTest`, covers the **production key layout** rather
 than the test one. CI installs a proxy signed with a fresh random key that carries the SHA-256 of
@@ -282,19 +286,23 @@ secondary profile, in CI on every push: `PREMISE VERIFIED on API 34` / `on API 3
 
 ### Which platforms CI covers, and one belief it corrected
 
-Four blocking jobs run the *full* suite: **API 34 and 35 on AOSP `target: default`**, **API 36 on
-`google_apis`**, and a **release E2E** job on API 35 that repeats everything against the
-R8-minified, **release-signed** app — signed with a per-run ephemeral key generated inside the
-workflow, never the committed test identity, with the three signer equalities (app ==
-instrument, app == the digest baked into the prod-signed proxy, app != the test key) asserted
-before an emulator even boots. That job is what proves the production authorization path with a
-key that exists nowhere in the repo. A fifth, **API 37**, is marked EXPERIMENTAL and allowed to
-fail; the project targets API 37, so that is an open gap rather than a closed one — its two
-blockers (a won't-fix guest graphics assert, and secondary users that stick at
-`RUNNING_LOCKED`) are named to the mechanism in `research/07` §3, with mitigations and a
-sticky-unlock probe under measurement. Every instrument phase on every job reports a whitelist
-verdict: a pass requires the runner's own `OK (N tests)`, because a crashed guest once exited 0
-and was reported as verified.
+Four blocking jobs run the *full* suite — premise, production caller-auth, the in-app
+installer-session flow, and the process-death/resume choreography: **API 34 and 35 on AOSP
+`target: default`**, **API 36 on `google_apis`**, and a **release E2E** job on API 35 that
+repeats everything against the R8-minified, **release-signed** app — signed with a per-run
+ephemeral key generated inside the workflow, never the committed test identity, with the
+three signer equalities (app == instrument, app == the digest baked into the prod-signed
+proxy, app != the test key) asserted before an emulator even boots. That job is what proves
+the production authorization path with a key that exists nowhere in the repo. The **API 37**
+job is **dispatch-only**: the project targets API 37, but its two blockers are upstream and
+measured to the mechanism — a guest graphics assert Google declared intended behaviour
+(issuetracker 546200928; both of its triggers are disabled on the job, and no new aborts
+since run #50) and secondary users that stick at `RUNNING_LOCKED`, whose CE-unlock the image
+crashes mid-way (run #53's probe: the workaround *starts* the unlock, the framework then
+dies). The harness stays `workflow_dispatch`-ready for a fixed image; an indefinitely-red
+tick on main would train everyone to ignore red. Every instrument phase on every job reports
+a whitelist verdict: a pass requires the runner's own `OK (N tests)`, because a crashed guest
+once exited 0 and was reported as verified.
 
 The cause is known and is not a platform problem. `-show-kernel` puts the guest console in the job
 log, and the guest reports `Memory: 39808K/97744K available` — **95 MB of RAM**. Boot otherwise

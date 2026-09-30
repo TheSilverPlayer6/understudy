@@ -94,9 +94,13 @@ PackageInstaller phase** (session staging, per-user appop, confirmation dialog t
 UiAutomator, SUCCESS broadcast, bridge ping through the session-installed proxy); the
 **`premise-release` job** repeats all of it against the R8-minified **release** build signed
 with a per-run **ephemeral key** (keystore.properties mechanism, three signer equalities
-asserted before boot); and the **experimental API 37** job (§3.7). Every instrument phase's
-verdict is a whitelist: a pass REQUIRES the runner's own `OK (N tests)` line, because run #49
-proved `am instrument` exits 0 through `Process crashed.` and `INSTRUMENTATION_ABORTED`.
+asserted before boot). A **process-death phase** (`TransferDeathPremiseTest`, §4c) SIGKILLs a
+journaled pull mid-flight and proves a fresh process resumes it byte-exact. The **API 37**
+job is **dispatch-only** since #53: two measured upstream defects (won't-fix gfxstream assert;
+secondary users stuck `RUNNING_LOCKED` whose unlock crashes mid-way) are documented negatives,
+not a red tick main should carry every push. Every instrument phase's verdict is a whitelist:
+a pass REQUIRES the runner's own `OK (N tests)` line, because run #49 proved `am instrument`
+exits 0 through `Process crashed.` and `INSTRUMENTATION_ABORTED`.
 
 Runs #18–#27 were green end to end. #28/#29 produced milestone 5; #31 first proved it.
 **#49 proved the release path** (app = instrument = ephemeral signer `eed99923…` ≠ committed
@@ -166,32 +170,35 @@ in rough priority order:
    `target: default` on API 34/35 and `google_apis` on 36/37, all x86_64 emulators. The
    `<queries><intent>` discovery mechanism and the confirmation-dialog flow (the button text
    and the package behind it are OEM-replaceable) are the parts most worth confirming.
-4. **SAF writes on a device (§3.5, half-answer pending).** The instrumented coverage is
-   blocked on a question CI now asks on every run: can a shell grant a tree URI at all
-   (`content`/`pm grant-uri-permission`, `am broadcast --grant-*`, then
-   `dumpsys activity uri-permissions`)? If any candidate works on any level, the
-   `SafDestination` device test becomes writable; if none does, the item is honestly
-   "needs a human or a UI rig" and should be labelled that instead of looking unfinished.
-   Grant persistence across reboot and the `hasFragileUserData` checkbox are in the same
-   bucket — both need a human or a reboot-capable rig.
-5. **Process-death recovery: the device half.** The journal and resume offer are built and
-   JVM-proven (11 tests pin the semantics: RUNNING-at-launch = death's fingerprint; deliberate
-   ends are never offered). What no test has done on a device: die mid-transfer for real and
-   take the resume through a re-established session. Automatable in principle — one instrument
-   invocation starts a pull and is `am kill`ed mid-flight, the next asserts the journal and
-   resumes — and worth doing once the SAF question (4) says where the bytes can go in CI.
-6. **API 37 (§3.7).** Graphics: root-caused to the won't-fix guest/host gfxstream mismatch
-   (issuetracker 546200928); both RegionSampling triggers (SystemUI **and** the HOME app —
-   run #49 proved one is not enough) are disabled on that job, and run #50 saw no new aborts.
-   Storage: the secondary user reaches `running` but stays **`RUNNING_LOCKED`** — CE storage
-   never unlocks, which kills its FUSE daemon and makes every non-directBootAware component
-   (including our provider) unavailable; API 34/35 show `RUNNING_UNLOCKED` in the same
-   diagnostic block, and their cold stopped-state providers answer queries, killing the
-   competing stopped-state theory by measurement. The sticky-unlock workaround (foreground
-   switch, then switch back) is scripted and gated on seeing LOCKED; the next runs decide
-   whether API 37 goes green or the job is retired with its blocker proven and documented.
-   Either outcome is acceptable; a green tick over an empty suite is no longer possible
-   anywhere — every phase's verdict requires the runner's own `OK (N tests)`.
+4. **SAF writes on a device (§3.5) — answered, and the answer is "not from a shell".** The
+   probe ran on every level in #53: `content` has no grant subcommand, `pm
+   grant-uri-permission` is `Unknown command`, and an `am broadcast --grant-*` to a
+   receiver-less package confers nothing (`dumpsys activity uri-permissions` afterwards:
+   empty). So instrumented SAF coverage needs a human or a UI rig driving the real picker —
+   possible with the UiAutomator muscle the installer phase built, but per-level wording and
+   layout risk against the flow OEMs customise hardest. The probe stays in the script as a
+   tripwire for any future level that grows a shell grant path. Grant persistence across
+   reboot and the `hasFragileUserData` checkbox are in the same needs-a-human bucket.
+5. **Process-death recovery: the device half is built; watch its first runs.**
+   `TransferDeathPremiseTest` (two instrument invocations: `die` self-SIGKILLs mid-pull
+   inside the per-chunk callback; `resume` must find the journal RUNNING and finish the
+   transfer byte-exact, with completed files mtime-proven untouched) runs on 34/35/36 and
+   the release job, where it also proves an R8'd app writes a journal a fresh R8'd process
+   can read. The die phase's verdict is the on-disk journal XML read as root, because a crash
+   is its success signature. What remains for a human: the resume *UI* (the Files-tab card)
+   and a resume through a session that was re-established after the death, rather than the
+   still-alive one CI has.
+6. **API 37 (§3.7) — dispatch-only, both blockers measured.** Graphics: the won't-fix
+   guest/host gfxstream assert (issuetracker 546200928); both RegionSampling triggers
+   (SystemUI and the resolved HOME app) are disabled on the job and no new aborts have
+   occurred since #50. Storage: the secondary user reaches `RUNNING_LOCKED` and its CE
+   storage never unlocks — FUSE dead, components of installed packages unavailable even to
+   root — and the sticky-unlock probe in #53 showed a foreground switch *starts* the unlock
+   (`RUNNING_UNLOCKING`) before the framework crashes mid-unlock. Nothing further is
+   reachable from this side; the job runs on `workflow_dispatch` only, harness intact, and
+   the re-test conditions (fixed image / fixed gfxstream / an ATD image for 37) are recorded
+   in research/07 §3. If a dispatch re-test ever passes twice in a row, promote the entry
+   back into the push matrix — the gate is one `if:` line.
 7. **Debug and release builds cannot coexist on one device** (both define
    `dev.understudy.permission.BRIDGE`; `INSTALL_FAILED_DUPLICATE_PERMISSION`, same for
    upgrading over a build that left an *old* proxy installed). `InstallResultReceiver.describe`
