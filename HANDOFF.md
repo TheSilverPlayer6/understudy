@@ -1,10 +1,12 @@
 # HANDOFF — read this first
 
-Last updated 2026-09-30. **Milestone 4 is complete: the premise is verified on real Android
-emulators.** Milestone 5 fixed the two things that stopped it being *usable* — a signed release
-that could not talk to the proxy it generated, and a device that could only ever hold one proxy at
-a time — and found a third problem underneath them: the app could not see its proxies at all.
-Sections 4 and 4b record what that took; section 3 is what remains.
+Last updated 2026-09-30 (milestone 6). **The release path is proven on a device with a key
+from nowhere in the repo; the proxy is 96% smaller and device-proved; the in-app install path
+runs in CI including its confirmation dialog; a transfer now survives process death with a
+resume offer; and API 37's blockers are named to the mechanism** — a won't-fix guest graphics
+assert whose triggers are removed, and a secondary user stuck at `RUNNING_LOCKED` whose
+workaround is under measurement. Sections 4c and research/07 record what that took; section 3
+is what remains.
 
 Companion documents, in reading order:
 
@@ -18,11 +20,12 @@ Companion documents, in reading order:
 | `research/04-milestone3-running-it.md` | Robolectric verification, and what blocked a real device |
 | `research/05-milestone4-premise-verified.md` | **The premise, verified.** Three stacked defects, and two findings that changed the product |
 | `research/06-milestone5-bridge-permission-ownership.md` | **Who owns the bridge permission, and who can see whom.** Includes the AOSP visibility rule the bridge had been relying on by accident |
+| `research/07-milestone6-release-path-api37-anatomy.md` | **The release path on a device, the API 37 anatomy completed, and three gaps closed honestly.** Includes the silent-green verdict class and why a pass must be asserted, not not-contradicted |
 | `../HANDOFF-NOTE.md` | **Sandbox traps** (outside the repo, in the agent workspace root) — read before touching the build environment |
 
-If you only read one more thing after this file, make it `research/06`. It explains how six
-consecutive green CI runs proved the bridge worked while saying nothing about *why*, and how the
-reason turned out to be an undocumented platform rule that a well-intentioned fix deleted.
+If you only read one more thing after this file, make it `research/07` §2: it explains how a
+CI phase reported `CALLER-AUTH VERIFIED` while its process had crashed before a single test
+ran, and why every verdict in this project is now a whitelist.
 
 The `research/` tree is committed to this repo as of milestone 5. Before that every one of those
 links was dead — the files lived only in the agent workspace.
@@ -64,8 +67,8 @@ So there are two paths, and the app must tell the user which one they are on:
 gradlew clean :app:assembleDebug :app:assembleRelease :proxy:assembleRelease
         :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:check
   → BUILD SUCCESSFUL
-  186 unit tests, 0 failures
-  app-debug.apk ~20.5 MB · app-release-unsigned.apk ~2.1 MB · proxy-template.apk ~699 KB
+  197 unit tests, 0 failures
+  app-debug.apk ~19.8 MB · app-release(-signed) ~1.5 MB · proxy-template.apk 27,760 B
   lint: 0 errors, 2 warnings (both kept deliberately)
 
 apksigner verify --verbose --print-certs <generated proxy>
@@ -83,26 +86,36 @@ aapt2 dump xmltree app-debug.apk
        android:name="dev.understudy.action.PROXY_DISCOVERY"   (how the app finds them)
 ```
 
-CI: `https://github.com/TheSilverPlayer6/understudy`. The `jvm` job covers unit tests, every
-variant, lint, `checkProxyTemplateFresh`, and apksigner/aapt2/zipalign over the generated APK. The
-two `premise` jobs boot KVM emulators on API 34 and API 35 and report `OK (11 tests)` plus
-`PREMISE VERIFIED`.
+CI: `https://github.com/TheSilverPlayer6/understudy`. Five jobs: the `jvm` job covers unit
+tests, every variant, lint, `checkProxyTemplateFresh`, and apksigner/aapt2/zipalign over the
+generated APK; **three blocking `premise` jobs** (API 34/35 AOSP, API 36 google_apis) run the
+FUSE premise, the production caller-auth path and — since milestone 6 — the **in-app
+PackageInstaller phase** (session staging, per-user appop, confirmation dialog tapped by
+UiAutomator, SUCCESS broadcast, bridge ping through the session-installed proxy); the
+**`premise-release` job** repeats all of it against the R8-minified **release** build signed
+with a per-run **ephemeral key** (keystore.properties mechanism, three signer equalities
+asserted before boot); and the **experimental API 37** job (§3.7). Every instrument phase's
+verdict is a whitelist: a pass REQUIRES the runner's own `OK (N tests)` line, because run #49
+proved `am instrument` exits 0 through `Process crashed.` and `INSTRUMENTATION_ABORTED`.
 
-Runs #18–#27 were green end to end. **#28 and #29 were red**, and are the reason milestone 5
-exists. **#31 is green on all three jobs**, and on both API levels reports:
+Runs #18–#27 were green end to end. #28/#29 produced milestone 5; #31 first proved it.
+**#49 proved the release path** (app = instrument = ephemeral signer `eed99923…` ≠ committed
+test key `bdbdca70…`; baked digest = `eed99923…`; CALLER-AUTH + PREMISE VERIFIED) **and
+exposed the silent-green verdict class**. **#50 device-proved the 27 KB proxy** (premise +
+caller-auth green on 34/35/36 running proxies generated from the R8-shrunk template) and
+measured that a granted `REQUEST_INSTALL_PACKAGES` appop does **not** make a commit silent —
+the confirmation dialog is the flow. A representative green line now reads:
 
 ```
 OK: 2 proxies coexist for user 10
-OK (11 tests)   BridgePremiseTest          OK (2 tests)   CallerAuthPremiseTest
-CALLER-AUTH VERIFIED: the app reached a proxy signed with a DIFFERENT key
-PREMISE VERIFIED                           OK: 'pm uninstall -k' preserved the data directory
-PREMISE-DIAG queryIntentReceivers(dev.understudy.action.PROXY_DISCOVERY)
-  = OK ([com.example.prodgame, com.example.targetgame])
-CALLERAUTH-DIAG holdsBridge=GRANTED · ownCertificateSha256=bdbdca70… (matches the baked digest)
+OK (11 tests) BridgePremiseTest · OK (2 tests) CallerAuthPremiseTest · OK (1 test) InstallerSessionPremiseTest
+CALLER-AUTH VERIFIED · INSTALLER-SESSION VERIFIED · PREMISE VERIFIED
+OK: 'pm uninstall -k' preserved the data directory
+CALLERAUTH-DIAG holdsBridge=GRANTED · ownCertificateSha256=<the app's own cert> (matches the baked digest)
 ```
 
-Section 4 records milestone 4, section 4b records what #28 and #29 turned up, and
-`research/06` §5b has the full evidence.
+Sections 4/4b record milestones 4/5, `research/06` §5b their evidence, and `research/07`
+everything above in milestone 6's own words.
 
 ### Components
 
@@ -114,99 +127,81 @@ Section 4 records milestone 4, section 4b records what #28 and #29 turned up, an
 | `proxy-core` | **done** | The proxy's real code as an Android *library*, zero dependencies, so `:app` tests can drive it. Now also holds `CallerVerdictCache` (positive-only verdicts — §4b) and `ProxyDiscoveryReceiver` (the inert component that makes the proxy visible to the app). |
 | `proxy` | **done** | Manifest + dependency on `:proxy-core`; builds the template APK. |
 | `bridge` | **done, Robolectric- and device-verified** | `BridgeClient`, `BridgeError`, contract mirror. `BridgeContract` is duplicated on purpose and compared by reflection, `DISCOVERY_ACTION` included. `BridgeErrorTest` (8) pins the two failure messages, because on a user's device the string *is* the diagnosis. |
-| `install` | **device-verified via CI's adb path; the in-app `PackageInstaller` UX is not** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI installs with `adb install --user`, which proves the *artifacts* install; the session-based flow the app uses is still unexercised. `describe()` — the only explanation a user ever sees on failure — now has 12 tests. There is deliberately **no** `isInstalled()`; see the comment in `ProxyInstaller`. |
+| `install` | **done — device-verified through BOTH paths** | `ApkGenerator`, `ProxyInstaller`, `InstallResultReceiver`. CI still installs the premise proxies with `adb install --user` (artifacts), and `InstallerSessionPremiseTest` now walks the app's own path on a device: session stage → commit → `STATUS_PENDING_USER_ACTION` → confirmation dialog (tapped by UiAutomator; run #50 measured that no appop makes a commit silent) → SUCCESS broadcast → ping through the session-installed proxy. `describe()` has 12 tests. There is deliberately **no** `isInstalled()`; see the comment in `ProxyInstaller`. The uninstall dialog is NOT covered — `hasFragileUserData` guarantees one and no headless tap is faithful for a data-retention choice. |
 | `core` | **done, 34 tests** | `SessionState`, `SessionManager`. Guards the teardown paths — see `SessionManagerTest`. |
-| `shell` | **done, 14 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. |
-| `transfer` | **built, model-tested** | Streamed, resumable, write-then-swap. Both directions now have a UI. |
-| `storage` | **built, not device-verified** | SAF destination with persisted grants; `collectSourcesForPush` walks a user-chosen tree. |
-| `ui` | **built, never run** | Compose: Session / Files / Shell / About tabs. |
+| `shell` | **done, 14 tests** | `ShellBackend` + `ShellCommands` runbook generator. `restoreOwnership` is new and load-bearing; section 4 explains why. Wireless-ADB backend still not shipped — §3.2 now carries the reconciliation that was blocking it. |
+| `transfer` | **done — engine + journal** | Streamed, resumable, write-then-swap; both directions have a UI. `TransferJournal` persists the transfer in flight, so a process death mid-pull is *recoverable*: the next launch offers a resume (RUNNING-at-launch is exactly death's fingerprint; deliberate ends record terminal outcomes and are never offered). 22 engine + 11 journal tests. |
+| `storage` | **built, not device-verified** | SAF destination with persisted grants; `collectSourcesForPush` walks a user-chosen tree. The CI feasibility probe (§3.5) will decide whether device coverage is automatable at all. |
+| `ui` | **built; the Files tab's recovery card is exercised by journal tests, the rest never run** | Compose: Session / Files / Shell / About tabs. |
 | `packaging` (tests) | **done** | `BridgePermissionOwnershipTest` (6) pins who defines the bridge permission and how the app finds proxies, on the sources *and* on the committed binary template. `CallerVerdictCacheTest` (8) pins that a rejection is never remembered. |
 
 ---
 
 ## 3. What remains
 
-Everything on the milestone-4 list is done, and so is the item that headed it: the production
-caller-authentication path. In rough priority order, what is actually left:
+Milestone 6 closed §3.1's device half, §3.4, §3.6 and §3.8, delivered §3.2's blocking
+reconciliation as a decision rather than code, and reduced §3.7 (API 37) from a mystery to
+two named platform defects with one workaround under measurement. What is genuinely left,
+in rough priority order:
 
-1. **Confirm milestone 5 on a device, then make release signing the default path.** The design
-   problem is solved (§4b): `:app` defines `BRIDGE` so it can hold it against a differently-signed
-   proxy, `enforceCaller()` pins the caller to the exact install that generated the proxy, and
-   `<queries><intent>` is what lets the app find it at all. What remains is that release signing is
-   still opt-in via an uncommitted `keystore.properties`, so release output stays unsigned without
-   it. Once a real keystore is in place, the whole flow needs one end-to-end pass on a device with
-   a *signed* release build — CI signs both APKs with the committed test key, so it exercises the
-   permission path and the digest path but never a genuine release key.
-2. **Wireless-ADB `ShellBackend`.** Only the manual command-generating backend ships, by choice: a
-   backend that claims to be available and then cannot execute is worse than none. Note the
-   finding in section 4 — a plain uid-2000 shell cannot reach another user's storage, so the
-   runbook the backend would drive needs root, and self-paired wireless ADB lands in uid 2000.
-   That has to be reconciled before the backend is worth writing.
+1. **The operator's real distribution key.** The mechanism is proven end to end on a device
+   with an ephemeral non-test key (`premise-release` job, run #49+: signed release app +
+   matching instrument, prod-signed proxy carrying the release certificate's digest,
+   CALLER-AUTH and PREMISE VERIFIED against both). What remains cannot live in a repo by
+   design: generate the real keystore (README's keytool recipe), put `keystore.properties`
+   beside the checkout, build, and — optionally — re-run the premise flow once against that
+   exact artifact. Everything downstream of "a key exists" is measured.
+2. **Wireless-ADB `ShellBackend`.** The reconciliation §3.2 was blocked on is delivered in
+   `research/07` §8, and it splits the runbook by privilege: a uid-2000 self-paired shell can
+   do the whole no-conflict flow, installs, `-k` teardowns and diagnostics, but the
+   rename-aside `mv`/`chown` steps need root on every Android 11+ build measured — the
+   conflict case has **no** data-safe unprivileged path, a platform fact, not a backend
+   defect. So the honest backend is capability-gated: probe `su`, offer the runbook only when
+   it answers, label the data-destroying alternative as such, and never report an unavailable
+   step as available. Not built yet, deliberately: the pairing+transport stack is substantial
+   and **no CI here can exercise it** (emulators offer no wireless-debugging self-pairing),
+   and an untestable protocol client is how "claims available, cannot execute" gets born.
+   Build it when a device rig exists, to the line research/07 draws.
 3. **OEM testing** — MIUI/HyperOS, ColorOS, One UI. Everything verified so far is AOSP
-   `target: default` on API 34/35 and `google_apis` on 36/37, all on x86_64 emulators. The
-   `<queries><intent>` discovery mechanism is the part most worth confirming on OEM builds, since it
-   is what makes the bridge reachable at all, and OEMs are where package-visibility behaviour is
-   most likely to have been "enhanced".
-4. **The installer UX on a device.** CI installs with `adb install --user`; the
-   `PackageInstaller` session path, `STATUS_PENDING_USER_ACTION` and the per-profile
-   `REQUEST_INSTALL_PACKAGES` grant flow are unexercised.
-5. **SAF writes** to a user-picked tree, grant persistence across reboot, and the
-   `hasFragileUserData` "Keep app data" checkbox on a current build.
-6. **Recovery from process death** mid-transfer.
-7. **API 37 boots a guest with ~95 MB of RAM.** API 34, 35 and 36 run the *full* suite. Getting 36
-   was itself a correction: this item used to say the rooted jobs had to stop at 35 because
-   `google_apis` refuses `adb root`. That was **wrong** — `adb root` succeeds on
-   `system-images;android-36;google_apis;x86_64` (run #36: rooted on attempt 1, fixtures planted
-   under `/data/media/10`, `-k` preservation asserted, `OK (11 tests)`, nothing skipped). The
-   milestone-4 finding was measured on API 34/35 `google_apis` images and is true *there*; it is not
-   a property of the target.
-
-   API 37 is addressable: `api-level: "37.0"` **quoted** (unquoted, YAML makes it a float and
-   Actions renders `37`, building a package name that does not exist), and the image installs and
-   the AVD builds. The emulator then never comes up. `-show-kernel` says why, in one line:
-
-   ```
-   [    0.605550] Memory: 39808K/97744K available (22528K kernel code, …)
-   ```
-
-   **95 MB of guest RAM.** Android cannot boot in that. Boot otherwise proceeds normally — init
-   first stage, eight modules, `/metadata` mounted, logical partitions created, "DSU not detected,
-   proceeding with normal boot" at t=1.73 s — and then the serial console goes quiet, which is what
-   second-stage init does; there is no panic and no crash. `adb` reports `device offline` for the
-   whole budget because there is nothing on the other end yet.
-
-   The RAM was never set, and that is the second lesson here. Runs #37 and #38 passed
-   `ram: 4096M`; the action's input is **`ram-size`**, `ram` is not one of its 26 inputs, and
-   GitHub hands an unknown `with:` key to the action as an environment variable and nothing more.
-   The config dump printed `RAM size: ` (empty) in both runs and I read past it, then committed
-   "the RAM hypothesis was worth one test and is now disproved". It had not been tested. When an
-   instrument reads empty, the instrument is the finding — which is what this repo's own
-   verification-methodology section says, written by the same process that just ignored it.
-
-   Why the other jobs are fine: for API 34/35/36 the emulator notices the AVD default is too small
-   and logs `INFO | Increasing RAM size to 2560MB`. For the API 37 image it does not, so the AVD
-   default stands. `ram-size` is now set per-matrix — `4096M` for API 37, empty for the three that
-   already boot, so exactly one variable changes on the one job that is failing.
-
-   The job stays `experimental` (`continue-on-error`, EXPERIMENTAL in its name) until it boots. A
-   job allowed to fail has to be labelled as one, or a green run stops meaning anything.
-
-   `ALLOW_NO_ROOT=1` stays on the `google_apis` jobs as a fallback, since whether an image Google
-   publishes is rootable is not ours to control; if one ever is not, the job degrades to the
-   root-free subset and says so three ways — a `::warning::` annotation on the run's front page, a
-   banner listing exactly which claims are and are not proven, and a final line reading
-   `PREMISE VERIFIED (REDUCED, no root)`. The AOSP jobs stay at 0 so losing root fails loudly; run
-   #30 is what a silent degradation looked like.
-8. **Proxy APK size** (~690 KB, dominated by the Kotlin stdlib in `classes.dex`).
-9. **Debug and release builds cannot coexist on one device.** Both define
-   `dev.understudy.permission.BRIDGE`, so the second install fails with
-   `INSTALL_FAILED_DUPLICATE_PERMISSION`. Same for upgrading over a build that left an *old* proxy
-   installed — those still define the permission themselves. `InstallResultReceiver.describe` now
-   says so. Namespacing the permission per `applicationId` would fix it, but that means teaching
-   `ManifestPatcher` a second substitution and touching the exact-match rule milestone 4 hardened;
-   not worth it for a case that only affects developers.
-
----
+   `target: default` on API 34/35 and `google_apis` on 36/37, all x86_64 emulators. The
+   `<queries><intent>` discovery mechanism and the confirmation-dialog flow (the button text
+   and the package behind it are OEM-replaceable) are the parts most worth confirming.
+4. **SAF writes on a device (§3.5, half-answer pending).** The instrumented coverage is
+   blocked on a question CI now asks on every run: can a shell grant a tree URI at all
+   (`content`/`pm grant-uri-permission`, `am broadcast --grant-*`, then
+   `dumpsys activity uri-permissions`)? If any candidate works on any level, the
+   `SafDestination` device test becomes writable; if none does, the item is honestly
+   "needs a human or a UI rig" and should be labelled that instead of looking unfinished.
+   Grant persistence across reboot and the `hasFragileUserData` checkbox are in the same
+   bucket — both need a human or a reboot-capable rig.
+5. **Process-death recovery: the device half.** The journal and resume offer are built and
+   JVM-proven (11 tests pin the semantics: RUNNING-at-launch = death's fingerprint; deliberate
+   ends are never offered). What no test has done on a device: die mid-transfer for real and
+   take the resume through a re-established session. Automatable in principle — one instrument
+   invocation starts a pull and is `am kill`ed mid-flight, the next asserts the journal and
+   resumes — and worth doing once the SAF question (4) says where the bytes can go in CI.
+6. **API 37 (§3.7).** Graphics: root-caused to the won't-fix guest/host gfxstream mismatch
+   (issuetracker 546200928); both RegionSampling triggers (SystemUI **and** the HOME app —
+   run #49 proved one is not enough) are disabled on that job, and run #50 saw no new aborts.
+   Storage: the secondary user reaches `running` but stays **`RUNNING_LOCKED`** — CE storage
+   never unlocks, which kills its FUSE daemon and makes every non-directBootAware component
+   (including our provider) unavailable; API 34/35 show `RUNNING_UNLOCKED` in the same
+   diagnostic block, and their cold stopped-state providers answer queries, killing the
+   competing stopped-state theory by measurement. The sticky-unlock workaround (foreground
+   switch, then switch back) is scripted and gated on seeing LOCKED; the next runs decide
+   whether API 37 goes green or the job is retired with its blocker proven and documented.
+   Either outcome is acceptable; a green tick over an empty suite is no longer possible
+   anywhere — every phase's verdict requires the runner's own `OK (N tests)`.
+7. **Debug and release builds cannot coexist on one device** (both define
+   `dev.understudy.permission.BRIDGE`; `INSTALL_FAILED_DUPLICATE_PERMISSION`, same for
+   upgrading over a build that left an *old* proxy installed). `InstallResultReceiver.describe`
+   says so. Namespacing the permission per `applicationId` would fix it at the cost of a
+   second `ManifestPatcher` substitution against the exact-match rule milestone 4 hardened;
+   still not worth it for a case that only affects developers. Accepted.
+8. **Proxy cold-start timing.** The template fell from 701,358 to 27,760 bytes (dex
+   2,323,652 → 46,048) and is device-proved (run #50's suites ran on proxies generated from
+   it). The unmeasured remainder: whether the smaller dex actually cold-starts faster, which
+   was half the argument for shrinking it.
 
 ## 4. Milestone 4: the premise, verified
 
@@ -439,6 +434,71 @@ The same log review found that the caller-auth phase reported "(no CALLERAUTH-DI
 after the previous phase. The diagnostics written to explain a caller-auth failure were absent in
 the only place they would ever be needed. Capture now restarts around that phase.
 
+## 4c. Milestone 6: the release path, the verdict class, and API 37's anatomy
+
+Full narrative in `research/07-milestone6-release-path-api37-anatomy.md`; this is the index.
+
+**The release path, on a device (§3.1).** A `premise-release` CI job generates an ephemeral
+RSA-4096 identity per run, writes `keystore.properties` exactly as an operator would, builds
+`-Punderstudy.testBuildType=release` (which makes AGP create — and sign like the release — the
+androidTest variant), points the proxy-generation tests at the ephemeral key via new
+`understudy.appKeystore*` Gradle properties, asserts three signer equalities *before boot*
+(app == instrument; app == the digest baked into the prod-signed proxy; app != the committed
+test key), then runs the full suite against the minified release build. Run #49: all three
+equalities held and both suites ran green — with one hole, below.
+
+**The silent-green verdict class (§2 of research/07).** Run #49's release job printed
+`INSTRUMENTATION_RESULT: shortMsg=Process crashed.` for both suites — matching no failure
+pattern, with `am instrument` exiting 0 — and reported `CALLER-AUTH VERIFIED` having run zero
+tests. The API 37 job did the same via `INSTRUMENTATION_ABORTED: System has crashed.` The
+crash was `NoClassDefFoundError: androidx.tracing.Trace` at `AndroidJUnitRunner.onCreate`:
+the runner resolves it through the combined classloader, the debug app carried it as an
+unshaken transitive, R8 correctly stripped it from the release app, and no test APK ever
+carried it because AGP compiles androidTest with the app's runtime classpath as *provided* —
+`androidTestImplementation(tracing)` resolves but is never packaged (measured with dexdump,
+entry by entry). Fixed with a documented `-keep class androidx.tracing.**` in the app. And
+fixed as a *class*: every instrument verdict is now a whitelist — a pass requires the
+runner's own `OK (N tests)` line; aborts and empty outputs are environment failures, retried
+once (after re-checking the framework and restarting a stopped profile), never on real test
+failures.
+
+**The in-app install path (§3.4).** `InstallerSessionPremiseTest` + a CI phase on every job:
+real `ApkGenerator` → real `ProxyInstaller` session → real receiver → confirmation dialog →
+SUCCESS → `getPackageInfo` (installer-of-record visibility) → bridge ping. Two device
+corrections in two runs: #50 — a granted appop does **not** make the commit silent,
+`STATUS_PENDING_USER_ACTION` is the flow (`SessionManager` had it right all along); #51 —
+the dialog cannot resume for a background user (`Can't resume non-current user`), so the
+phase switches the profile to the foreground and back. UiAutomator taps the button; a
+missing button dumps the window hierarchy into the artifact first.
+
+**Process death mid-transfer (§3.6).** `TransferJournal`: one durable entry, RUNNING written
+at begin and replaced only by deliberate terminal writes, so RUNNING-at-relaunch *is* death's
+fingerprint and a cancelled transfer never offers a resume. `resumeTransfer()` checks its
+preconditions (same-package Ready session, restorable SAF grant) and names the remedy when
+one fails. Files tab shows the offer. 11 tests.
+
+**The proxy is 27,760 bytes (§3.8).** R8 on `:proxy` with every `dev.understudy.proxytpl.**`
+name kept and the stdlib shaken; `kotlin_builtins` excluded. Dex 2,323,652 → 46,048. Verified
+in-sandbox (197/197, apksigner/aapt2/zipalign, template freshness) *before* committing, then
+on-device in #50: premise + caller-auth green on 34/35/36 with proxies generated from it.
+
+**API 37 (§3.7).** Graphics: upstream won't-fix (issuetracker 546200928); the host capability
+cannot be disabled (`Bad feature name` on canary 37.3.2.0 — the HEAD "fix" of #48 was a
+no-op; GLDMA flags measured ineffective by others), so the *triggers* go: SystemUI **and**
+the resolved HOME package disabled, framework restarted (#49 proved one of the two is not
+enough — surfaceflinger re-aborted mid-suite with only the launcher left to sample). Storage:
+the secondary user sticks at `RUNNING_LOCKED` — CE storage never unlocks, FUSE dies,
+components of installed packages "do not exist", providers are unresolvable even from root;
+API 34/35 controls in the same diagnostic block show `RUNNING_UNLOCKED` and cold
+stopped-state providers answering queries. The scripted workaround: on seeing LOCKED, a
+foreground switch (unlock is sticky), switch back, re-probe. The next runs decide green vs.
+documented retirement.
+
+**SAF feasibility probe (§3.5).** Every job now asks, informationally, whether a shell can
+grant a tree URI (`content`/`pm grant-uri-permission`, `am broadcast --grant-*`, then
+`dumpsys activity uri-permissions`). The answer decides whether §3.4's sibling item is
+automatable or belongs on the needs-a-human list, with evidence either way.
+
 ## 5. Things that will bite you
 
 Ranked by how much time they cost me.
@@ -461,8 +521,13 @@ Ranked by how much time they cost me.
 2. **Robolectric registers providers by class reference**, so it never resolves component names
    through PackageManager. That is why the manifest-renaming bug in section 6 survived a green
    suite.
-3. **`am instrument` exits 0 even when tests fail.** The CI script greps the output for
-   `FAILURES!!!` / `Error in ` instead of trusting the exit code.
+3. **`am instrument` exits 0 through every way a run can not-run.** It exits 0 when tests
+   fail (hence the old `FAILURES!!!` grep), when the process crashes before a single test
+   (`INSTRUMENTATION_RESULT: shortMsg=Process crashed.`), and when the system dies mid-suite
+   (`INSTRUMENTATION_ABORTED`) — run #49 hit both of the latter and the old grep reported
+   `CALLER-AUTH VERIFIED` over zero executed tests. Blacklists lose; every phase now demands
+   the runner's positive `OK (N tests)` line (`instrument_verdict`), and absence of failure
+   is treated as an environment failure, retried once, never as a pass.
 4. **Gradle serves tests from cache.** A test whose *side effect* is an artifact a later CI step
    verifies must actually run: `org.gradle.caching=false` plus `--rerun-tasks`.
 5. **`tar -x` sync does not delete.** A file moved out of a module survives remotely and keeps
@@ -472,8 +537,24 @@ Ranked by how much time they cost me.
    also reads that directory and Gradle 9 fails on the implicit dependency.
 7. **`adb root` needs a userdebug/eng image.** `target: google_apis` is production-signed and
    refuses it, and uid 2000 cannot reach *another* user's emulated storage at all.
-8. The workspace traps (mount namespaces, heredoc substitution, snapshot lag, silently-failing
-   edits) are in `../HANDOFF-NOTE.md` section 1. They cost more time than the cryptography did.
+8. **The instrumented process resolves classes through BOTH APKs.** `AndroidJUnitRunner` needs
+   `androidx.tracing.Trace` and finds it, in debug, only because the unminified app happens to
+   package it. R8 strips it from the release app (correctly — app code never calls it) and no
+   test APK ever carried it, because AGP compiles androidTest with the app's runtime classpath
+   as *provided*: `androidTestImplementation(tracing)` resolves and is silently NOT packaged.
+   The release instrument died at startup on API 34+ alike. If a future R8 change removes a
+   class the runner or a test needs at runtime, this is the shape it arrives in — and the
+   `-keep class androidx.tracing.**` in `app/proguard-rules.pro` is load-bearing, not
+   decorative. Its comment records the dexdump measurements; believe those, not intuition.
+9. **A confirmation dialog is per-current-user, and `start-user` is not `switch-user`.** UI
+   only draws for the foreground user: run #51's installer phase launched the platform's
+   `CONFIRM_INSTALL` activity for a background profile, got
+   `W/ActivityTaskManager: Can't resume non-current user`, and UiAutomator correctly found no
+   button on a screen that was never rendered. Any phase that touches UI must
+   `am switch-user N` first (and switch back, to leave the harder background-user case intact
+   for everything else).
+10. The workspace traps (mount namespaces, heredoc substitution, snapshot lag, silently-failing
+    edits) are in `../HANDOFF-NOTE.md` section 1. They cost more time than the cryptography did.
 
 ---
 
