@@ -108,12 +108,13 @@ test key `bdbdca70…`; baked digest = `eed99923…`; CALLER-AUTH + PREMISE VERI
 exposed the silent-green verdict class**. **#50 device-proved the 27 KB proxy** (premise +
 caller-auth green on 34/35/36 running proxies generated from the R8-shrunk template) and
 measured that a granted `REQUEST_INSTALL_PACKAGES` appop does **not** make a commit silent —
-the confirmation dialog is the flow. A representative green line now reads:
+the confirmation dialog is the flow. Run **#57 is green end to end** — all four device jobs (34, 35, 36, release) reporting:
 
 ```
 OK: 2 proxies coexist for user 10
-OK (11 tests) BridgePremiseTest · OK (2 tests) CallerAuthPremiseTest · OK (1 test) InstallerSessionPremiseTest
+OK (11 tests) BridgePremiseTest · OK (2 tests) CallerAuthPremiseTest · OK (1 test) InstallerSessionPremiseTest · OK (1 test) TransferDeathPremiseTest
 CALLER-AUTH VERIFIED · INSTALLER-SESSION VERIFIED · PREMISE VERIFIED
+PROCESS-DEATH RECOVERY VERIFIED — 4 files byte-exact, 3 skip-proven by mtime, journal DONE
 OK: 'pm uninstall -k' preserved the data directory
 CALLERAUTH-DIAG holdsBridge=GRANTED · ownCertificateSha256=<the app's own cert> (matches the baked digest)
 ```
@@ -179,15 +180,17 @@ in rough priority order:
    layout risk against the flow OEMs customise hardest. The probe stays in the script as a
    tripwire for any future level that grows a shell grant path. Grant persistence across
    reboot and the `hasFragileUserData` checkbox are in the same needs-a-human bucket.
-5. **Process-death recovery: the device half is built; watch its first runs.**
+5. **Process-death recovery: closed on device (run #57).**
    `TransferDeathPremiseTest` (two instrument invocations: `die` self-SIGKILLs mid-pull
    inside the per-chunk callback; `resume` must find the journal RUNNING and finish the
    transfer byte-exact, with completed files mtime-proven untouched) runs on 34/35/36 and
    the release job, where it also proves an R8'd app writes a journal a fresh R8'd process
    can read. The die phase's verdict is the on-disk journal XML read as root, because a crash
-   is its success signature. What remains for a human: the resume *UI* (the Files-tab card)
-   and a resume through a session that was re-established after the death, rather than the
-   still-alive one CI has.
+   is its success signature. #57: SIGKILL at `filesDone=3` mid-copy of the 64 MB file, journal
+   RUNNING on disk, fresh process planned all four, three skip-proven by untouched mtimes,
+   everything byte-exact, journal DONE — on the debug AND the R8 release build. What remains
+   for a human: the resume *UI* (the Files-tab card) and a resume through a session that was
+   re-established after the death, rather than the still-alive one CI has.
 6. **API 37 (§3.7) — dispatch-only, both blockers measured.** Graphics: the won't-fix
    guest/host gfxstream assert (issuetracker 546200928); both RegionSampling triggers
    (SystemUI and the resolved HOME app) are disabled on the job and no new aborts have

@@ -1,15 +1,12 @@
 # Milestone 6 — the release path made real, the API 37 anatomy completed, and three gaps closed honestly
 
-Date: 2026-09-30 · Status: **the whole flow — premise, caller-auth and the in-app install
-including its confirmation dialog — is device-verified on API 36** (run #52:
-`INSTALLER-SESSION VERIFIED`, `PREMISE VERIFIED`, `CALLER-AUTH VERIFIED` in one job). Runs
-#49–#52 were a four-run evidence chain: #49 proved the release path and exposed the
-silent-green verdict class; #50 device-proved the 27 KB proxy and measured that no appop
-makes a commit silent; #51 located API 37's blocker to `State: RUNNING_LOCKED` and the
-dialog's to `Can't resume non-current user`; #52 passed on 36 and named the last two defects
-(AOSP's `user setup not complete` suppression; a state-extraction bug that skipped the
-unlock probe). Run #53 carries those fixes. The experimental API 37 job is documented in §3
-with its blocker identified to a mechanism, not to a vibe.
+Date: 2026-09-30 · Status: **run #57 is green end to end.** On API 34, 35, 36 and against the
+R8-minified, ephemeral-key-signed release build: `PREMISE VERIFIED`, `CALLER-AUTH VERIFIED`,
+`INSTALLER-SESSION VERIFIED` (confirmation dialog tapped), and `PROCESS-DEATH RECOVERY
+VERIFIED — 4 files byte-exact, 3 skip-proven by mtime, journal DONE`. The API 37 job is
+dispatch-only, its two upstream blockers named to the mechanism (§3). Runs #49–#57 were a
+nine-run evidence chain in which a device corrected a confident claim five separate times —
+§9 keeps the tally.
 
 This milestone picked up HANDOFF §3's list and worked it: items 1, 4, 6 and 8 are closed,
 item 7 (API 37) advanced from "never boots" to "boots, mitigated graphics, one broken platform
@@ -317,7 +314,8 @@ proxy), and a SAF grant that still restores. Refusals name the remedy. A resumed
 cheap by construction; a resumed push re-copies the tree, because a size-skip in that
 direction could leave a truncated file *inside the save directory* looking restored.
 
-The **device half followed in the same session**: `TransferDeathPremiseTest`, two instrument
+The **device half followed in the same session** — and repaid the diagnostics discipline
+twice. `TransferDeathPremiseTest`, two instrument
 invocations, because a dead process cannot keep testing. Phase `die` builds a known tree in
 the proxy's storage through the real bridge (three small files plus 64 MB), begins a
 journaled pull into app-specific external storage, and — the moment the big file passes
@@ -332,6 +330,27 @@ must end terminal. The die phase's verdict is the journal XML read from disk as 
 the instrument exit — a crash is its success signature, which is why this one phase cannot
 use the whitelist helper. Running on 34/35/36 and the release job, where it additionally
 proves an R8'd app writes a journal a fresh R8'd process can read.
+
+Its first two runs are a case study in why the diagnostics exist. Run #55 failed all four
+jobs with `s0.bin missing after resume`, and the theory committed alongside it said the
+resumed pull "planned zero files" — a guess. Run #56, carrying plan-first logging and
+root-level `ls` of the raw lower filesystem, disproved the guess in one job log:
+
+```
+DEATH-DIAG resume: planned 4 file(s), 67895296 bytes: death-test-src/big.bin=67108864, …
+raw lower fs after the kill: big.bin 67108864, s0.bin 262144, s1.bin 262144, s2.bin 262144
+destination at failure:      death-test-dest/death-test-src/{big.bin, s0.bin, …}
+```
+
+The recovery mechanism had *worked* — journal survived the SIGKILL, the fresh process found
+it, planned the tree, copied all 67 MB. The test's assertions were the bug:
+`planPull(root, "death-test-src")` yields paths relative to the ROOT, so the pull writes
+under `<dest>/death-test-src/` and every `File(destRoot(), "s0.bin")` assertion looked one
+directory too high — the same shape as milestone 4's data-root bug (§4 of HANDOFF: a path
+one level wrong reads as "the premise is false"), caught in one run instead of six because
+the instruments were already in place. The fix also renamed the big file `z-big.bin` so it
+walks last: #56's kill landed at `filesDone=0`, making the mtime skip-proof vacuous; #57
+dies at `filesDone=3` and proves the three completed files were not re-copied.
 
 ---
 
@@ -423,10 +442,24 @@ for; implementation waits for a device rig or a library decision.
 
 ## 9. What this milestone says about the method
 
-Three times this session, a device corrected a confident claim inside a single run: the
-feature-flag "fix" that was a `Bad feature name` no-op (#48's own log, found by reading
-instead of re-running); the silent install that does not exist (#50); and the green verdict
-over a crashed process (#49, twice). Each correction was cheap *because* the harness now
-carries its own evidence — crash dumps, whitelisted verdicts, three-equality pre-boot
-assertions, before/after discriminators. The pattern worth keeping: when a phase can pass
-without proving anything, the phase is the bug.
+Five times this session, a measurement corrected a confident claim — and every correction
+cost one run because the evidence was already wired in:
+
+1. the feature-flag "fix" that was a `Bad feature name` no-op (#48's own log, found by
+   reading it instead of re-running anything);
+2. the silent install that does not exist — the appop grants the *ask*, not the skip (#50);
+3. the green verdict over a crashed process — twice, in one run (#49), which is why verdicts
+   are whitelists now;
+4. the dialog that renders only for the current, *provisioned* user, and shouts INSTALL on
+   AOSP while Google's installer says Install (#51, #52, #53 — three layers, one per run);
+5. the death-phase "empty plan" that was a full plan landing one directory over (#55's theory
+   disproved by #56's diagnostics).
+
+Plus two that never reached a device because a cheaper instrument caught them: a job-level
+`if:` referencing `matrix` fails the whole workflow at startup with zero jobs (#54's
+annotation), and a bare `-P` Gradle property arrives as the empty string, so an
+`isNotBlank()` gate silently never fired — caught because the "kept" build came out
+byte-identical in size to the unkept one.
+
+The pattern worth keeping: when a phase can pass without proving anything, the phase is the
+bug — and when a failure arrives, the first commit should carry instruments, not theories.

@@ -181,10 +181,11 @@ No `apksigner`, no `zipalign`, no BouncyCastle at runtime.
 
 ## Testing
 
-197 JVM tests, all passing, plus three instrumented suites that run on real Android emulators in
+197 JVM tests, all passing, plus four instrumented suites that run on real Android emulators in
 CI (`.github/workflows/emulator.yml`) — because the central claim is about the kernel's FUSE layer,
-the second is about platform package-visibility and permission rules, and the third is about the
-`PackageInstaller` session flow the app itself uses, and no JVM test can reach any of them.
+the second is about platform package-visibility and permission rules, the third is about the
+`PackageInstaller` session flow the app itself uses, and the fourth is about surviving a real
+SIGKILL mid-transfer, and no JVM test can reach any of them.
 
 
 | Suite | Covers |
@@ -256,11 +257,10 @@ keytool -printcert                         →  parses our hand-built PKCS#7
   broadcast grant to a receiver-less package confers nothing. Covering SAF on a device needs a
   human or a UI rig driving the real picker; the probe stays as a tripwire for future builds.
 * **The resume *UI*, and a resume through a re-established session.** Process death itself is
-  covered on every job: `TransferDeathPremiseTest` SIGKILLs a journaled pull mid-flight and a
-  fresh instrument process must find the journal `RUNNING`, re-run the pull to byte-exact
-  completion, and prove the already-finished files were not re-copied (untouched mtimes). What
-  no CI run exercises is the human-facing half — the Files-tab recovery card — or resuming after
-  the *session* died with the process and had to be re-verified first.
+  covered on every job (`TransferDeathPremiseTest`, above; `PROCESS-DEATH RECOVERY VERIFIED`
+  in run #57 on all four). What no CI run exercises is the human-facing half — the Files-tab
+  recovery card — or resuming after the *session* died with the process and had to be
+  re-verified first.
 
 A second instrumented class, `CallerAuthPremiseTest`, covers the **production key layout** rather
 than the test one. CI installs a proxy signed with a fresh random key that carries the SHA-256 of
@@ -268,6 +268,14 @@ the app's own certificate, alongside the same-key one, and asserts the app can s
 `ping`, `mkdirs`, `openFile` in both directions, `list` and `statPath` — every gated provider
 entry point. That install also proves two proxies coexist for one user, which they could not while
 the proxy defined the bridge permission itself.
+
+A fourth instrumented class, `TransferDeathPremiseTest`, covers **process death mid-transfer**:
+one invocation builds a known tree in the proxy's storage, begins a journaled pull and SIGKILLs
+itself mid-copy of the 64 MB file; the script verifies as root that the journal on disk says
+RUNNING; the next invocation must find the entry, resume the pull to byte-exact completion
+(SHA-256 per file), prove by untouched mtimes that the three files which had finished were not
+re-copied, and leave the journal terminal. It runs on every job including the release one, where
+it also proves an R8'd app writes a journal a fresh R8'd process can read.
 
 A third, `InstallerSessionPremiseTest`, covers the **in-app install path** the other two deliberately
 do not touch (`adb install` proves artifacts, not machinery): the real `ApkGenerator` builds a proxy
