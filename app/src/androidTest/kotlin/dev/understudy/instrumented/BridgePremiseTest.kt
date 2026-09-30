@@ -418,38 +418,43 @@ class BridgePremiseTest {
                 "works without it — and the app must never request it (Play-restricted)",
         )
 
+        // EVERY measurement is taken and printed before ANY assertion below. Written the other way
+        // round first, and run #46 showed why that is wrong: the ping assertion failed, the test
+        // ended there, and the visibility diagnostics that would have explained it never printed.
+        // The one thing learned was "unreachable", which is the symptom and not the cause. This is
+        // the same rule CallerAuthPremiseTest already follows, and the reason it is stated here:
+        // a diagnostic placed after the assertion it explains is not a diagnostic.
         val ping = runCatching { client().ping(target) }
-        println("PREMISE-DIAG ping=$ping")
-        assertTrue(
-            ping.isSuccess,
-            "the provider is unreachable while provider access is the only detection mechanism: " +
-                "${ping.exceptionOrNull()}",
-        )
-
-        // Informational: how the package-query APIs see the proxy from here. Recorded so the
-        // removed isInstalled() is not re-added on the strength of a guess.
         val getInfo = runCatching { pm.getPackageInfo(target, 0) }
         val appInfo = runCatching { pm.getApplicationInfo(target, 0) }
         val resolveProvider = runCatching { pm.resolveContentProvider(target, 0) }
         val launch = runCatching { pm.getLaunchIntentForPackage(target) }
-        println("PREMISE-DIAG visibility from the app, no QUERY_ALL_PACKAGES:")
-        println("PREMISE-DIAG   getPackageInfo       = ${describe(getInfo)}")
-        println("PREMISE-DIAG   getApplicationInfo   = ${describe(appInfo)}")
-        println("PREMISE-DIAG   resolveContentProvider = ${describe(resolveProvider)}")
-        println("PREMISE-DIAG   getLaunchIntentForPackage = ${describe(launch)}")
-
-        // The mechanism the app actually relies on: <queries><intent> against the discovery action
-        // every proxy advertises. If this is empty the bridge is unreachable no matter how
-        // correct the provider is, and the failure will surface as "Unknown authority".
         val discovery = runCatching<List<String>> { discoveryPackages(pm) }
-        println("PREMISE-DIAG   queryIntentReceivers(${dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION}) = ${describe(discovery)}")
         val found = discovery.getOrNull().orEmpty()
+
+        println("PREMISE-DIAG visibility from the app, no QUERY_ALL_PACKAGES:")
+        println("PREMISE-DIAG   ping                     = ${if (ping.isSuccess) "OK " + ping.getOrNull() else describe(ping)}")
+        println("PREMISE-DIAG   getPackageInfo           = ${describe(getInfo)}")
+        println("PREMISE-DIAG   getApplicationInfo       = ${describe(appInfo)}")
+        println("PREMISE-DIAG   resolveContentProvider   = ${describe(resolveProvider)}")
+        println("PREMISE-DIAG   getLaunchIntentForPackage = ${describe(launch)}")
+        println("PREMISE-DIAG   queryBroadcastReceivers(${dev.understudy.bridge.BridgeContract.DISCOVERY_ACTION}) = ${describe(discovery)}")
+        println("PREMISE-DIAG   this process: uid=${Process.myUid()} userId=${myUserId()}")
+
+        // The mechanism the app relies on to find a proxy whose package name is chosen at
+        // generation time. If this is empty the bridge is unreachable however correct the provider
+        // is, and the symptom is `Unknown authority` — identical to "not installed".
         assertTrue(
             target in found,
             "the proxy is not visible through <queries><intent>. Without visibility the platform " +
                 "refuses to resolve its provider and every bridge call fails with " +
                 "'Unknown authority' — indistinguishable from a proxy that is not installed. " +
                 "Resolved: $found",
+        )
+        assertTrue(
+            ping.isSuccess,
+            "the provider is unreachable while provider access is the only detection mechanism: " +
+                "${ping.exceptionOrNull()}",
         )
         println("PREMISE-DIAG   => discovery resolves $target; provider access works")
     }

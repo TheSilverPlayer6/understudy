@@ -270,7 +270,35 @@ log "start the new profile"
 # switch-user brings it to the foreground, which is how the app will normally be used. We also
 # want the *unstarted* case to work, so the bridge is exercised after a start-user as well.
 adb shell am start-user "$USER_ID" 2>&1 || true
-sleep 5
+
+# WAIT for the profile to actually be running. `sleep 5` was enough on API 34/35/36 and is not on
+# 37, and run #46 is the evidence — this is the same mistake as assuming `sys.boot_completed` means
+# the framework will stay up, one level down:
+#
+#   API 36:  UserInfo{10:understudy-ci:410} running
+#   API 37:  UserInfo{11:understudy-ci:400}          <- no "running", and 0x400 lacks the
+#                                                       0x010 FLAG_INITIALIZED bit that 0x410 has
+#
+# `am start-user` had already printed "Success: user started", and `await_framework` passed because
+# `pm list users` answered — the package service is up, the *profile* is not. Everything after that
+# ran against a user that was still coming up: installs went in, the instrumented suite started, and
+# 7 of 11 tests failed with `Unknown authority` while both proxies were confirmed installed. That
+# reads as "the bridge is broken on Android 17" and is actually "we did not wait".
+await_user_running() {
+  local want="$1" i line
+  for i in $(seq 1 60); do
+    line="$(adb shell pm list users 2>/dev/null | tr -d '\r' | grep -E "UserInfo\{$want:" || true)"
+    case "$line" in
+      *running*) echo "user $want running after $i poll(s): $line"; return 0 ;;
+    esac
+    sleep 3
+  done
+  echo "!! user $want never reached 'running' in 180 s:"
+  adb shell pm list users 2>&1 || true
+  adb shell dumpsys user 2>/dev/null | head -40 || true
+  return 1
+}
+await_user_running "$USER_ID" || exit 1
 # Starting a secondary profile restarts enough of the framework that the package service can be
 # absent for a while. Run #42 died on the very next line — `pm list users`, which exists only to
 # print something — because `set -e` does not care why a command failed.
