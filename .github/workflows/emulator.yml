@@ -290,6 +290,18 @@ jobs:
           # use google_apis, which turns out to be rootable anyway; see the matrix comment.
           target: ${{ matrix.target }}
           arch: x86_64
+          # Set explicitly rather than left to the emulator's auto-bump, because the API 37 image
+          # did not get one. Run #37: API 36 logged "Increasing RAM size to 2560MB" and booted;
+          # API 37 logged nothing, ran on the AVD default (its boot properties show
+          # dalvik.vm.heapsize=64m), stayed `adb: device offline` for the whole 600 s budget and
+          # timed out. Same action, same options, same runner — the only difference was memory.
+          # 4096M is comfortably inside the runner's 16 GB and strictly more than the 2560MB the
+          # working jobs were already using, so it cannot be a regression for them.
+          ram: 4096M
+          # 600 was enough for every image that booted, but the budget is what turned a slow boot
+          # into a hard failure with no diagnostic. Headroom costs nothing on a job that is
+          # already the longest in the workflow.
+          emulator-boot-timeout: 1200
           # No snapshot: a restored one could carry a user profile or an install over from a
           # previous attempt and make a failing step look like it succeeded.
           disable-animations: true
